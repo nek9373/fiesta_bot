@@ -581,12 +581,19 @@ async def _join_room(message: Message, room_id: str):
 
     player_rooms[user_id] = room.room_id
 
+    join_msg = f"{await cal('player_joined')} {player.first_name} ({room.num_players} игроков)"
+
+    # Уведомляем всех в комнате (кроме нового игрока) через ЛС
+    for uid in room.players:
+        if uid != user_id:
+            try:
+                await send_dm(uid, join_msg)
+            except Exception:
+                pass
+
     if room.group_chat_id:
         try:
-            await bot.send_message(
-                room.group_chat_id,
-                f"{await cal('player_joined')} {player.first_name} ({room.num_players} игроков)"
-            )
+            await bot.send_message(room.group_chat_id, join_msg)
         except Exception:
             pass
 
