@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 # ═══════════════════════════════════════
 
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:1.5b")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:3b")
 
 HF_TOKEN = os.getenv("HF_TOKEN", "")
 HF_MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
