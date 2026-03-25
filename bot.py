@@ -117,10 +117,19 @@ CALAVERA_PHRASES = {
 
 import random as _rnd
 
+from llm import calavera_llm
+
+
 def calavera(key: str) -> str:
-    """Случайная фраза Калаверы."""
+    """Случайная СТАТИЧЕСКАЯ фраза Калаверы (синхронный фоллбэк)."""
     phrases = CALAVERA_PHRASES.get(key, ["..."])
     return _rnd.choice(phrases)
+
+
+async def cal(key: str, context: str = "") -> str:
+    """Асинхронная фраза Калаверы через LLM с фоллбэком на статические."""
+    fallback = CALAVERA_PHRASES.get(key, ["..."])
+    return await calavera_llm(key, context=context, fallback_phrases=fallback)
 
 # user_id -> room_id
 player_rooms: dict[int, str] = {}
@@ -315,13 +324,13 @@ async def send_writing_tasks(room):
 
         if task["is_character"]:
             text = (
-                f"{calavera('first_card')}\n\n"
+                f"{await cal('first_card')}\n\n"
                 f"Твой персонаж: {task['visible']}\n\n"
                 f"Напиши ОДНО слово:"
             )
         else:
             text = (
-                f"{calavera('new_tooth')}\n\n"
+                f"{await cal('new_tooth')}\n\n"
                 f"Зуб {room.current_tooth + 1}/{TOTAL_TEETH}\n\n"
                 f"На черепе написано:\n\n"
                 f"\"{task['visible']}\"\n\n"
@@ -375,7 +384,7 @@ async def send_next_guess(user_id: int):
         return
 
     skull = skulls[idx]
-    intro = calavera('guessing_start') + "\n\n" if idx == 0 else ""
+    intro = (await cal('guessing_start')) + "\n\n" if idx == 0 else ""
     text = (
         f"{intro}"
         f"Череп {idx + 1}/{len(skulls)}\n\n"
@@ -405,13 +414,13 @@ async def show_results(room):
     # Оценка от Калаверы
     ratio = results['rested_count'] / max(1, results['total_skulls'])
     if ratio >= 1.0:
-        lines.append(calavera('all_rested'))
+        lines.append(await cal('all_rested'))
     elif ratio >= 0.75:
-        lines.append(calavera('good_result'))
+        lines.append(await cal('good_result'))
     elif ratio >= 0.5:
-        lines.append(calavera('ok_result'))
+        lines.append(await cal('ok_result'))
     else:
-        lines.append(calavera('bad_result'))
+        lines.append(await cal('bad_result'))
 
     lines.append("")
 
@@ -456,7 +465,7 @@ async def show_results(room):
             InlineKeyboardButton(text="Ещё раз!", callback_data=f"restart:{room.room_id}")
         ]])
         try:
-            await bot.send_message(room.group_chat_id, calavera("farewell"), reply_markup=kb)
+            await bot.send_message(room.group_chat_id, await cal("farewell"), reply_markup=kb)
         except Exception:
             pass
 
@@ -480,7 +489,7 @@ async def cmd_start(message: Message):
         return
 
     await message.answer(
-        f"{calavera('welcome')}\n\n"
+        f"{await cal('welcome')}\n\n"
         "/create — создать комнату\n"
         "/join КОД — присоединиться\n"
         "/rules — правила\n"
@@ -576,7 +585,7 @@ async def _join_room(message: Message, room_id: str):
         try:
             await bot.send_message(
                 room.group_chat_id,
-                f"{calavera('player_joined')} {player.first_name} ({room.num_players} игроков)"
+                f"{await cal('player_joined')} {player.first_name} ({room.num_players} игроков)"
             )
         except Exception:
             pass
@@ -682,7 +691,7 @@ async def cb_start(cb: CallbackQuery):
         try:
             await bot.send_message(
                 room.group_chat_id,
-                f"{calavera('game_start')}\n\n"
+                f"{await cal('game_start')}\n\n"
                 f"Игроков: {room.num_players}{constraint_text}\n"
                 f"Жетоны кости: {room.initial_bone_tokens}\n"
                 f"Проверяйте личные сообщения!"
@@ -886,7 +895,7 @@ async def _handle_word(message: Message):
         return
 
     user_state[user_id] = None
-    await message.answer(calavera("word_accepted"))
+    await message.answer(await cal("word_accepted"))
 
     room = engine.rooms.get(room_id)
     if not room:
