@@ -1,16 +1,19 @@
 """
-Игровая логика Fiesta — чистый Python, без зависимости от Telegram.
+Игровая логика Fiesta: Карнавал мёртвых — кооперативная версия.
 """
 
 from __future__ import annotations
 
 import logging
 import random
+import re
 import time
 from typing import Optional
 
 from models import (
-    Association, Card, CardSource, GameState, Player, Room, RoomSettings,
+    TOTAL_CHARACTERS, TOTAL_TEETH,
+    AssociationStep, CardSource, ConstraintType, GameState,
+    Player, Room, RoomSettings, Skull,
 )
 from cards import get_characters
 
@@ -18,18 +21,98 @@ logger = logging.getLogger(__name__)
 
 
 class GameError(Exception):
-    """Ошибка игровой логики."""
     pass
 
 
+# ─── Валидация слов ───
+
+def validate_word(word: str, previous_word: str | None = None,
+                  character: str | None = None,
+                  constraint: ConstraintType | None = None) -> str | None:
+    """
+    Проверить слово по правилам. Возвращает ошибку или None.
+    """
+    word = word.strip()
+
+    # Одно слово (сложные допускаются)
+    if ' ' in word and not '-' in word:
+        # Проверяем что это не два отдельных слова
+        parts = word.split()
+        if len(parts) > 1:
+            return "Только одно слово! Сложные слова (через дефис) допускаются."
+
+    if len(word) < 2:
+        return "Слишком короткое слово."
+
+    if len(word) > 50:
+        return "Слишком длинное слово."
+
+    # Нельзя писать имена персонажей
+    if character and word.lower() == character.lower():
+        return "Нельзя писать имя персонажа!"
+
+    # Нельзя однокоренные с полученным словом
+    if previous_word:
+        prev_stem = previous_word.lower()[:4] if len(previous_word) >= 4 else previous_word.lower()
+        word_stem = word.lower()[:4] if len(word) >= 4 else word.lower()
+        if len(prev_stem) >= 4 and prev_stem == word_stem:
+            return f"Нельзя писать однокоренные слова с '{previous_word}'!"
+
+    # Ограничения уровней сложности
+    if constraint:
+        err = _check_constraint(word, constraint)
+        if err:
+            return err
+
+    return None
+
+
+def _check_constraint(word: str, constraint: ConstraintType) -> str | None:
+    w = word.lower()
+    if constraint == ConstraintType.THEME_OBJECT:
+        pass  # Тематику автоматически проверить сложно, доверяем игроку
+    elif constraint == ConstraintType.THEME_PLACE:
+        pass
+    elif constraint == ConstraintType.THEME_NATURE:
+        pass
+    elif constraint == ConstraintType.MAX_6_LETTERS:
+        # Считаем буквы (без дефиса)
+        letters = re.sub(r'[^а-яёa-z]', '', w)
+        if len(letters) > 6:
+            return f"Не более 6 букв! (сейчас {len(letters)})"
+    elif constraint == ConstraintType.NO_LETTER_E:
+        if 'е' in w or 'ё' in w:
+            return "Слово не должно содержать букву Е!"
+    elif constraint == ConstraintType.ENDS_WITH_A:
+        if not w.endswith('а'):
+            return "Слово должно заканчиваться на -А!"
+    elif constraint == ConstraintType.STARTS_WITH_M:
+        if not w.startswith('м'):
+            return "Слово должно начинаться на М!"
+    elif constraint == ConstraintType.STARTS_WITH_P:
+        if not w.startswith('п'):
+            return "Слово должно начинаться на П!"
+    elif constraint == ConstraintType.STARTS_WITH_T:
+        if not w.startswith('т'):
+            return "Слово должно начинаться на Т!"
+    elif constraint == ConstraintType.STARTS_WITH_R:
+        if not w.startswith('р'):
+            return "Слово должно начинаться на Р!"
+    elif constraint == ConstraintType.STARTS_WITH_S:
+        if not w.startswith('с'):
+            return "Слово должно начинаться на С!"
+    elif constraint == ConstraintType.STARTS_WITH_D:
+        if not w.startswith('д'):
+            return "Слово должно начинаться на Д!"
+    return None
+
+
 class GameEngine:
-    """Управляет всеми комнатами и игровой логикой."""
 
     def __init__(self):
         self.rooms: dict[str, Room] = {}
 
-    def _generate_room_id(self) -> str:
-        """Генерирует уникальный 4-символьный код комнаты."""
+    def _gen_room_id(self) -> str:
         import string
         chars = string.ascii_uppercase + string.digits
         for _ in range(100):
@@ -42,10 +125,8 @@ class GameEngine:
 
     def create_room(self, host: Player, group_chat_id: int | None = None,
                     settings: RoomSettings | None = None) -> Room:
-        """Создать новую комнату."""
-        room_id = self._generate_room_id()
+        room_id = self._gen_room_id()
         host.is_host = True
-
         room = Room(
             room_id=room_id,
             host_id=host.user_id,
@@ -54,336 +135,299 @@ class GameEngine:
         )
         room.players[host.user_id] = host
         self.rooms[room_id] = room
-
-        logger.info(f"Комната {room_id} создана хостом {host.first_name} ({host.user_id})")
+        logger.info(f"Комната {room_id} создана хостом {host.first_name}")
         return room
 
     def join_room(self, room_id: str, player: Player) -> Room:
-        """Присоединиться к комнате."""
         room = self.rooms.get(room_id.upper())
         if not room:
             raise GameError("Комната не найдена")
-        if room.state != GameState.LOBBY and room.state != GameState.COLLECTING_CARDS:
-            raise GameError("Игра уже идёт, присоединиться нельзя")
+        if room.state not in (GameState.LOBBY, GameState.COLLECTING_CARDS):
+            raise GameError("Игра уже идёт")
         if room.num_players >= room.settings.max_players:
-            raise GameError(f"Комната заполнена (максимум {room.settings.max_players})")
+            raise GameError("Комната заполнена (макс 8)")
         if player.user_id in room.players:
             raise GameError("Ты уже в комнате")
-
         room.players[player.user_id] = player
         room.last_activity = time.time()
-        logger.info(f"Игрок {player.first_name} ({player.user_id}) вошёл в комнату {room_id}")
+        logger.info(f"{player.first_name} вошёл в комнату {room_id}")
         return room
 
     def leave_room(self, room_id: str, user_id: int) -> tuple[Room, bool]:
-        """
-        Покинуть комнату.
-        Возвращает (room, room_destroyed).
-        """
         room = self.rooms.get(room_id)
         if not room or user_id not in room.players:
             raise GameError("Ты не в этой комнате")
-
         del room.players[user_id]
-        logger.info(f"Игрок {user_id} покинул комнату {room_id}")
-
         if not room.players:
             del self.rooms[room_id]
-            logger.info(f"Комната {room_id} удалена (все вышли)")
             return room, True
-
         if room.host_id == user_id:
             room.transfer_host()
-            logger.info(f"Хост комнаты {room_id} передан {room.host_id}")
-
         return room, False
 
     def find_room_by_player(self, user_id: int) -> Optional[Room]:
-        """Найти комнату, в которой состоит игрок."""
         for room in self.rooms.values():
             if user_id in room.players:
                 return room
         return None
 
-    # ─── Сбор пользовательских персонажей ───
+    # ─── Сбор персонажей ───
 
     def start_collecting(self, room_id: str, user_id: int) -> Room:
-        """Начать сбор пользовательских персонажей."""
         room = self.rooms.get(room_id)
         if not room:
             raise GameError("Комната не найдена")
         if user_id != room.host_id:
-            raise GameError("Только хост может управлять игрой")
+            raise GameError("Только хост")
         if room.state != GameState.LOBBY:
             raise GameError("Сбор можно начать только из лобби")
-
         room.state = GameState.COLLECTING_CARDS
-        room.last_activity = time.time()
-        logger.info(f"Комната {room_id}: сбор персонажей начат")
         return room
 
     def add_custom_character(self, room_id: str, user_id: int, character: str) -> Room:
-        """Добавить пользовательского персонажа."""
         room = self.rooms.get(room_id)
-        if not room:
-            raise GameError("Комната не найдена")
-        if user_id not in room.players:
-            raise GameError("Ты не в этой комнате")
-
+        if not room or user_id not in room.players:
+            raise GameError("Ты не в комнате")
         character = character.strip()
-        if len(character) < 2:
-            raise GameError("Слишком короткое имя")
-        if len(character) > 100:
-            raise GameError("Слишком длинное имя (макс 100 символов)")
-
-        # Проверка дублей
+        if len(character) < 2 or len(character) > 100:
+            raise GameError("Имя от 2 до 100 символов")
         existing = [c.lower() for c in room.custom_characters]
         if character.lower() in existing:
-            raise GameError("Такой персонаж уже добавлен")
-
+            raise GameError("Уже добавлен")
         room.custom_characters.append(character)
-        room.last_activity = time.time()
-        logger.info(f"Комната {room_id}: добавлен персонаж '{character}' от {user_id}")
         return room
 
     # ─── Запуск игры ───
 
     def start_game(self, room_id: str, user_id: int) -> Room:
-        """Запустить игру: раздать карточки, определить порядок."""
         room = self.rooms.get(room_id)
         if not room:
             raise GameError("Комната не найдена")
         if user_id != room.host_id:
-            raise GameError("Только хост может запустить игру")
+            raise GameError("Только хост может запустить")
         if room.state not in (GameState.LOBBY, GameState.COLLECTING_CARDS):
             raise GameError("Игра уже идёт")
         if room.num_players < room.settings.min_players:
             raise GameError(f"Нужно минимум {room.settings.min_players} игрока")
 
-        # Проверяем что всем можно писать в ЛС
         no_dm = [p for p in room.players.values() if not p.dm_available]
         if no_dm:
             names = ", ".join(p.first_name for p in no_dm)
-            raise GameError(f"Не могу писать в ЛС: {names}. Пусть напишут мне /start в личку.")
+            raise GameError(f"Не могу писать в ЛС: {names}. Пусть напишут /start в личку.")
 
-        # Определяем порядок игроков (случайный)
+        # Порядок игроков
         room.player_order = list(room.players.keys())
         random.shuffle(room.player_order)
 
-        # Выбираем источник персонажей
+        # Получаем персонажей: N для игроков + (8-N) обманок
         source = room.settings.card_source.value
-        custom = room.custom_characters if room.custom_characters else None
-
-        # Если есть кастомные и нет явного выбора — mixed
+        custom = room.custom_characters or None
         if custom and source == "default":
             source = "mixed"
 
-        characters = get_characters(
+        all_chars = get_characters(
             category=room.settings.category,
-            count=room.num_players,
+            count=TOTAL_CHARACTERS,
             custom=custom,
             source=source,
         )
+        if len(all_chars) < TOTAL_CHARACTERS:
+            raise GameError(f"Недостаточно персонажей: {len(all_chars)}, нужно {TOTAL_CHARACTERS}")
 
-        if len(characters) < room.num_players:
-            raise GameError(f"Недостаточно персонажей: есть {len(characters)}, нужно {room.num_players}")
+        # Первые N — для игроков, остальные — обманки
+        player_chars = all_chars[:room.num_players]
+        room.decoy_characters = all_chars[room.num_players:]
 
-        # Раздаём карточки
-        room.cards.clear()
+        # Создаём черепа
+        room.skulls.clear()
         for i, uid in enumerate(room.player_order):
-            card = Card(
-                character=characters[i],
-                owner_id=uid,
-            )
-            room.cards[card.card_id] = card
+            skull = Skull(character=player_chars[i], owner_id=uid)
+            room.skulls[skull.skull_id] = skull
 
-        room.current_step = 0
-        room.step_submitted.clear()
+        # Все 8 персонажей для угадывания (перемешаны)
+        room.all_characters = all_chars[:]
+        random.shuffle(room.all_characters)
+
+        # Стартовые жетоны кости
+        bone_table = {4: 0, 5: 1, 6: 2, 7: 3, 8: 4}
+        room.initial_bone_tokens = bone_table.get(room.num_players, 0)
+        room.bone_tokens = room.initial_bone_tokens
+
+        # Ограничения (уровни сложности)
+        room.active_constraints.clear()
+        if room.settings.difficulty_level > 0:
+            all_constraints = list(ConstraintType)
+            random.shuffle(all_constraints)
+            room.active_constraints = all_constraints[:room.settings.difficulty_level]
+
+        room.current_tooth = 0
+        room.tooth_submitted.clear()
         room.state = GameState.WRITING
         room.last_activity = time.time()
 
         logger.info(
-            f"Комната {room_id}: игра началась, {room.num_players} игроков, "
-            f"порядок: {room.player_order}"
+            f"Комната {room_id}: игра, {room.num_players} игроков, "
+            f"персонажи: {player_chars}, обманки: {room.decoy_characters}"
         )
         return room
 
     # ─── Этап ассоциаций ───
 
     def get_current_task(self, room: Room, user_id: int) -> dict | None:
-        """
-        Что должен сделать игрок на текущем шаге.
-        Возвращает {"card_id": ..., "visible_text": ..., "step": ..., "is_character": bool}
-        или None если уже ответил.
-        """
+        """Что должен сделать игрок на текущем зубе."""
         if room.state != GameState.WRITING:
             return None
-        if user_id in room.step_submitted:
+        if user_id in room.tooth_submitted:
             return None
 
-        card = room.get_card_for_writer(user_id, room.current_step)
-        if not card:
+        skull = room.get_skull_for_writer(user_id, room.current_tooth)
+        if not skull:
             return None
 
-        is_character = room.current_step == 0
+        is_first_tooth = room.current_tooth == 0
+
+        # Ограничение для этого зуба
+        constraint = None
+        if room.current_tooth < len(room.active_constraints):
+            constraint = room.active_constraints[room.current_tooth]
+
         return {
-            "card_id": card.card_id,
-            "visible_text": card.visible_text,
-            "step": room.current_step,
-            "is_character": is_character,
+            "skull_id": skull.skull_id,
+            "visible": skull.current_visible,
+            "is_character": is_first_tooth,
+            "tooth": room.current_tooth,
+            "constraint": constraint,
+            "character": skull.character if is_first_tooth else None,
         }
 
-    def submit_association(self, room_id: str, user_id: int, text: str) -> dict:
-        """
-        Записать ассоциацию.
-        Возвращает {"step_complete": bool, "game_phase_changed": bool}.
-        """
+    def submit_word(self, room_id: str, user_id: int, word: str) -> dict:
+        """Записать слово-ассоциацию."""
         room = self.rooms.get(room_id)
         if not room:
             raise GameError("Комната не найдена")
         if room.state != GameState.WRITING:
             raise GameError("Сейчас не этап ассоциаций")
         if user_id not in room.players:
-            raise GameError("Ты не в этой комнате")
-        if user_id in room.step_submitted:
-            raise GameError("Ты уже отправил ассоциацию на этом шаге")
+            raise GameError("Ты не в комнате")
+        if user_id in room.tooth_submitted:
+            raise GameError("Ты уже написал слово на этом шаге")
 
-        text = text.strip()
-        if not text or len(text) < 1:
-            raise GameError("Ассоциация не может быть пустой")
-        if len(text) > 200:
-            raise GameError("Слишком длинная ассоциация (макс 200 символов)")
+        word = word.strip()
 
-        card = room.get_card_for_writer(user_id, room.current_step)
-        if not card:
-            raise GameError("Не найдена карточка для тебя на этом шаге")
+        skull = room.get_skull_for_writer(user_id, room.current_tooth)
+        if not skull:
+            raise GameError("Не найден череп для тебя")
 
-        assoc = Association(
+        # Определяем предыдущее слово (для проверки однокоренных)
+        previous = skull.last_word
+        character = skull.character
+
+        # Ограничение
+        constraint = None
+        if room.current_tooth < len(room.active_constraints):
+            constraint = room.active_constraints[room.current_tooth]
+
+        # Валидация
+        err = validate_word(word, previous_word=previous,
+                           character=character, constraint=constraint)
+        if err:
+            raise GameError(err)
+
+        step = AssociationStep(
             author_id=user_id,
-            text=text,
-            step=room.current_step,
+            word=word,
+            step=room.current_tooth,
         )
-        card.associations.append(assoc)
-        room.step_submitted.add(user_id)
+        skull.steps.append(step)
+        skull.teeth_filled = room.current_tooth + 1
+        room.tooth_submitted.add(user_id)
         room.last_activity = time.time()
 
         logger.info(
-            f"Комната {room_id}: {user_id} написал ассоциацию на шаге {room.current_step} "
-            f"для карточки {card.card_id}: '{text[:50]}...'"
+            f"Комната {room_id}: {user_id} написал '{word}' на зубе {room.current_tooth} "
+            f"(череп {skull.skull_id}, персонаж: {skull.character})"
         )
 
-        step_complete = len(room.step_submitted) >= room.num_players
+        tooth_complete = len(room.tooth_submitted) >= room.num_players
         game_phase_changed = False
 
-        if step_complete:
-            room.current_step += 1
-            room.step_submitted.clear()
-            logger.info(f"Комната {room_id}: шаг {room.current_step - 1} завершён")
+        if tooth_complete:
+            room.current_tooth += 1
+            room.tooth_submitted.clear()
 
-            if room.current_step >= room.total_steps:
+            if room.current_tooth >= TOTAL_TEETH:
                 room.state = GameState.GUESSING
                 room.guesses.clear()
                 room.guessing_done.clear()
                 room.guessing_progress.clear()
                 game_phase_changed = True
-                logger.info(f"Комната {room_id}: переход к угадыванию")
+                logger.info(f"Комната {room_id}: все 4 зуба заполнены, переход к угадыванию")
 
         return {
-            "step_complete": step_complete,
+            "tooth_complete": tooth_complete,
             "game_phase_changed": game_phase_changed,
         }
 
     def skip_player(self, room_id: str, user_id: int):
-        """Пропустить игрока (по таймауту)."""
+        """Пропустить по таймауту."""
         room = self.rooms.get(room_id)
         if not room or room.state != GameState.WRITING:
             return
-
-        if user_id in room.step_submitted:
+        if user_id in room.tooth_submitted:
             return
-
-        card = room.get_card_for_writer(user_id, room.current_step)
-        if card:
-            assoc = Association(
-                author_id=user_id,
-                text="(пропущено)",
-                step=room.current_step,
-            )
-            card.associations.append(assoc)
-
-        room.step_submitted.add(user_id)
-        logger.warning(f"Комната {room_id}: игрок {user_id} пропущен по таймауту")
+        skull = room.get_skull_for_writer(user_id, room.current_tooth)
+        if skull:
+            step = AssociationStep(author_id=user_id, word="...", step=room.current_tooth)
+            skull.steps.append(step)
+            skull.teeth_filled = room.current_tooth + 1
+        room.tooth_submitted.add(user_id)
+        logger.warning(f"Комната {room_id}: {user_id} пропущен по таймауту")
 
     # ─── Этап угадывания ───
 
     def get_guessing_data(self, room: Room) -> dict:
-        """
-        Данные для этапа угадывания.
-        Возвращает:
-        {
-            "associations": [{"card_id": ..., "text": ...}, ...],
-            "characters": [{"card_id": ..., "name": ...}, ...]
+        """Данные для угадывания: последние слова на черепах + все 8 персонажей."""
+        skulls_data = []
+        for skull in room.skulls.values():
+            skulls_data.append({
+                "skull_id": skull.skull_id,
+                "last_word": skull.last_word or "...",
+            })
+        random.shuffle(skulls_data)
+
+        return {
+            "skulls": skulls_data,
+            "characters": room.all_characters[:],  # Уже перемешаны
         }
-        Списки перемешаны по-разному.
-        """
-        associations = []
-        characters = []
-
-        for card in room.cards.values():
-            associations.append({
-                "card_id": card.card_id,
-                "text": card.last_association or "(нет ассоциаций)",
-            })
-            characters.append({
-                "card_id": card.card_id,
-                "name": card.character,
-            })
-
-        random.shuffle(associations)
-        random.shuffle(characters)
-
-        return {"associations": associations, "characters": characters}
 
     def submit_guess(self, room_id: str, user_id: int,
-                     card_id: str, character_card_id: str) -> dict:
-        """
-        Записать одну пару сопоставления.
-        Возвращает {"guess_count": int, "total": int, "all_done": bool}.
-        """
+                     skull_id: str, character: str) -> dict:
         room = self.rooms.get(room_id)
         if not room:
             raise GameError("Комната не найдена")
         if room.state != GameState.GUESSING:
             raise GameError("Сейчас не этап угадывания")
         if user_id not in room.players:
-            raise GameError("Ты не в этой комнате")
+            raise GameError("Ты не в комнате")
         if user_id in room.guessing_done:
             raise GameError("Ты уже завершил угадывание")
 
-        # Инициализация
         if user_id not in room.guesses:
             room.guesses[user_id] = {}
 
-        # Получаем имя персонажа по card_id
-        character_card = room.cards.get(character_card_id)
-        if not character_card:
-            raise GameError("Персонаж не найден")
-
-        room.guesses[user_id][card_id] = character_card.character
+        room.guesses[user_id][skull_id] = character
         room.last_activity = time.time()
 
         guess_count = len(room.guesses[user_id])
-        total = room.num_players
+        total = room.num_players  # Угадываем только черепа игроков
 
-        # Если все карточки сопоставлены
         if guess_count >= total:
             room.guessing_done.add(user_id)
 
         all_done = len(room.guessing_done) >= room.num_players
 
         if all_done:
-            room.state = GameState.REVEAL
-            logger.info(f"Комната {room_id}: все угадали, переход к результатам")
+            room.state = GameState.SCORING
 
         return {
             "guess_count": guess_count,
@@ -392,76 +436,108 @@ class GameEngine:
         }
 
     def force_finish_guessing(self, room_id: str):
-        """Принудительно завершить угадывание (по таймауту)."""
         room = self.rooms.get(room_id)
         if not room or room.state != GameState.GUESSING:
             return
-        room.state = GameState.REVEAL
-        logger.info(f"Комната {room_id}: угадывание завершено принудительно")
+        room.state = GameState.SCORING
 
-    # ─── Результаты ───
+    # ─── Подсчёт результатов ───
 
     def calculate_results(self, room_id: str) -> dict:
         """
-        Подсчитать результаты.
-        Возвращает:
-        {
-            "scores": {user_id: points},
-            "correct_answers": {card_id: character},
-            "chains": {card_id: [{"author": name, "text": text}, ...]},
-            "player_details": {user_id: [{"card_id": ..., "guessed": ..., "correct": ..., "is_correct": bool}]}
-        }
+        Кооперативный подсчёт:
+        - Для каждого черепа: сколько игроков угадали правильно
+        - Порог упокоения = N-1
+        - Если все N угадали — жетон кости
+        - Жетоны кости компенсируют недобор
         """
         room = self.rooms.get(room_id)
         if not room:
             raise GameError("Комната не найдена")
 
-        scores: dict[int, int] = {uid: 0 for uid in room.players}
-        correct_answers: dict[str, str] = {}
-        chains: dict[str, list] = {}
-        player_details: dict[int, list] = {uid: [] for uid in room.players}
+        threshold = room.rest_threshold
+        earned_bones = 0
+        skull_results = []
 
-        for card in room.cards.values():
-            correct_answers[card.card_id] = card.character
-            chain = []
-            for assoc in card.associations:
-                author = room.players.get(assoc.author_id)
-                chain.append({
-                    "author": author.first_name if author else "???",
-                    "text": assoc.text,
-                })
-            chains[card.card_id] = chain
+        for skull in room.skulls.values():
+            correct_count = 0
+            player_guesses = []
 
-        for uid in room.players:
-            guesses = room.guesses.get(uid, {})
-            for card_id, guessed_char in guesses.items():
-                card = room.cards.get(card_id)
-                if not card:
-                    continue
-                is_correct = guessed_char == card.character
+            for uid in room.players:
+                guesses = room.guesses.get(uid, {})
+                guessed = guesses.get(skull.skull_id, "")
+                is_correct = guessed == skull.character
                 if is_correct:
-                    scores[uid] = scores.get(uid, 0) + 1
-                player_details[uid].append({
-                    "card_id": card_id,
-                    "guessed": guessed_char,
-                    "correct": card.character,
-                    "is_correct": is_correct,
+                    correct_count += 1
+                player_guesses.append({
+                    "user_id": uid,
+                    "name": room.players[uid].first_name,
+                    "guessed": guessed,
+                    "correct": is_correct,
                 })
+
+            # Бонусный жетон кости если ВСЕ угадали
+            if correct_count >= room.num_players:
+                earned_bones += 1
+
+            room.skull_scores[skull.skull_id] = correct_count
+
+            skull_results.append({
+                "skull_id": skull.skull_id,
+                "character": skull.character,
+                "last_word": skull.last_word,
+                "correct_count": correct_count,
+                "threshold": threshold,
+                "rested": correct_count >= threshold,
+                "all_correct": correct_count >= room.num_players,
+                "chain": [
+                    {"author": room.players.get(s.author_id, Player(0, "", "???")).first_name,
+                     "word": s.word}
+                    for s in skull.steps
+                ],
+                "player_guesses": player_guesses,
+            })
+
+        room.bone_tokens += earned_bones
+        total_bones = room.bone_tokens
+
+        # Применяем жетоны кости к не-упокоенным
+        not_rested = [s for s in skull_results if not s["rested"]]
+        not_rested.sort(key=lambda s: s["threshold"] - s["correct_count"])
+
+        bones_used = 0
+        for s in not_rested:
+            deficit = threshold - s["correct_count"]
+            if deficit <= total_bones - bones_used:
+                s["rested"] = True
+                s["bones_used"] = deficit
+                bones_used += deficit
+            else:
+                s["bones_used"] = 0
+
+        rested_count = sum(1 for s in skull_results if s["rested"])
+        total_skulls = len(skull_results)
 
         room.state = GameState.FINISHED
-        logger.info(f"Комната {room_id}: результаты подсчитаны, очки: {scores}")
+
+        logger.info(
+            f"Комната {room_id}: упокоено {rested_count}/{total_skulls}, "
+            f"жетонов кости: {room.initial_bone_tokens}+{earned_bones}, использовано: {bones_used}"
+        )
 
         return {
-            "scores": scores,
-            "correct_answers": correct_answers,
-            "chains": chains,
-            "player_details": player_details,
+            "skulls": skull_results,
+            "rested_count": rested_count,
+            "total_skulls": total_skulls,
+            "initial_bones": room.initial_bone_tokens,
+            "earned_bones": earned_bones,
+            "bones_used": bones_used,
+            "threshold": threshold,
         }
 
     # ─── Очистка ───
 
     def cleanup_stale_rooms(self, max_age: float = 3600):
-        """Удалить неактивные комнаты."""
         now = time.time()
         to_delete = [
             rid for rid, room in self.rooms.items()
@@ -470,4 +546,3 @@ class GameEngine:
         ]
         for rid in to_delete:
             del self.rooms[rid]
-            logger.info(f"Комната {rid} удалена по таймауту")

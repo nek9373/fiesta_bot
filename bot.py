@@ -1,6 +1,6 @@
 """
-Telegram-бот для игры Fiesta.
-Транспортный слой: aiogram 3.x
+Telegram-бот: Fiesta — Карнавал мёртвых.
+Кооперативная игра с ассоциациями.
 """
 
 from __future__ import annotations
@@ -8,28 +8,28 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import random
 from typing import Optional
 
 from aiogram import Bot, Dispatcher, F, Router
-from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message,
 )
 
 from game import GameEngine, GameError
-from models import CardSource, GameState, Player, RoomSettings
+from models import CardSource, GameState, Player, RoomSettings, TOTAL_TEETH
 from store import FiestaStore
 
-# ─── Настройка логгирования ───
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("fiesta.log", encoding="utf-8"),
+    ],
 )
 logger = logging.getLogger(__name__)
 
-# ─── Инициализация ───
 TOKEN = os.getenv("FIESTA_BOT_TOKEN", "8265764394:AAHji-WSZ7wmq92TOFv1FD2vRXobMMksv9c")
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
@@ -39,41 +39,32 @@ dp.include_router(router)
 engine = GameEngine()
 store = FiestaStore()
 
-# user_id -> room_id (в какой комнате сейчас игрок)
+# user_id -> room_id
 player_rooms: dict[int, str] = {}
-
-# user_id -> состояние ввода ("writing" / "adding_character" / None)
+# user_id -> состояние
 user_state: dict[int, Optional[str]] = {}
-
-# Кэш данных для угадывания: user_id -> {"associations": [...], "characters": [...]}
+# Кэш угадывания: user_id -> данные
 guessing_cache: dict[int, dict] = {}
-
 # Таймеры
 step_timers: dict[str, asyncio.Task] = {}
 
 
-# ═══════════════════════════════════════════
+# ═══════════════════════════════════════
 #  Хелперы
-# ═══════════════════════════════════════════
+# ═══════════════════════════════════════
 
-def make_player(msg_or_user) -> Player:
-    """Создать Player из Message или User."""
-    if hasattr(msg_or_user, 'from_user'):
-        user = msg_or_user.from_user
-    else:
-        user = msg_or_user
+def make_player(msg_or_cb) -> Player:
+    user = msg_or_cb.from_user
     return Player(
         user_id=user.id,
         username=user.username or "",
         first_name=user.first_name or "Аноним",
-        dm_available=False,
     )
 
 
 async def check_dm(user_id: int) -> bool:
-    """Проверить, можно ли писать в ЛС."""
     try:
-        msg = await bot.send_message(user_id, "Проверка связи... Всё ок, я могу писать тебе в ЛС!")
+        msg = await bot.send_message(user_id, "Связь установлена!")
         await bot.delete_message(user_id, msg.message_id)
         return True
     except Exception:
@@ -81,38 +72,36 @@ async def check_dm(user_id: int) -> bool:
 
 
 async def send_dm(user_id: int, text: str, reply_markup=None):
-    """Отправить сообщение в ЛС."""
     try:
         await bot.send_message(user_id, text, reply_markup=reply_markup)
     except Exception as e:
-        logger.error(f"Не удалось отправить ЛС {user_id}: {e}")
+        logger.error(f"Не удалось ЛС {user_id}: {e}")
 
 
 async def update_group_status(room):
-    """Обновить статус в групповом чате."""
     if not room.group_chat_id:
         return
 
     if room.state == GameState.WRITING:
         pending = [
             room.players[uid].first_name
-            for uid in room.players
-            if uid not in room.step_submitted
+            for uid in room.players if uid not in room.tooth_submitted
         ]
+        constraint_text = ""
+        if room.current_tooth < len(room.active_constraints):
+            constraint_text = f"\nОграничение: {room.active_constraints[room.current_tooth].value}"
         text = (
-            f"Раунд ассоциаций: шаг {room.current_step + 1}/{room.total_steps}\n"
+            f"Зуб {room.current_tooth + 1}/{TOTAL_TEETH}{constraint_text}\n"
             f"Ждём: {', '.join(pending) if pending else 'все готовы!'}"
         )
     elif room.state == GameState.GUESSING:
         done = len(room.guessing_done)
-        total = room.num_players
         pending = [
             room.players[uid].first_name
-            for uid in room.players
-            if uid not in room.guessing_done
+            for uid in room.players if uid not in room.guessing_done
         ]
         text = (
-            f"Угадывание: {done}/{total} готовы\n"
+            f"Угадывание: {done}/{room.num_players}\n"
             f"Ждём: {', '.join(pending) if pending else 'все!'}"
         )
     elif room.state == GameState.LOBBY:
@@ -128,96 +117,81 @@ async def update_group_status(room):
     try:
         if room.status_message_id:
             try:
-                await bot.edit_message_text(
-                    text, room.group_chat_id, room.status_message_id,
-                )
+                await bot.edit_message_text(text, room.group_chat_id, room.status_message_id)
                 return
             except Exception:
                 pass
         msg = await bot.send_message(room.group_chat_id, text)
         room.status_message_id = msg.message_id
     except Exception as e:
-        logger.error(f"Ошибка обновления статуса в группе: {e}")
+        logger.error(f"Ошибка статуса группы: {e}")
 
 
-# ═══════════════════════════════════════════
+# ═══════════════════════════════════════
 #  Клавиатуры
-# ═══════════════════════════════════════════
+# ═══════════════════════════════════════
 
-def lobby_keyboard(room_id: str, is_host: bool) -> InlineKeyboardMarkup:
+def lobby_kb(room_id: str, is_host: bool) -> InlineKeyboardMarkup:
     buttons = []
     if is_host:
         buttons.append([InlineKeyboardButton(
-            text="Начать игру", callback_data=f"start:{room_id}"
-        )])
+            text="Начать игру", callback_data=f"start:{room_id}")])
         buttons.append([InlineKeyboardButton(
-            text="Добавить своих персонажей", callback_data=f"collect:{room_id}"
-        )])
+            text="Свои персонажи", callback_data=f"collect:{room_id}")])
         buttons.append([
-            InlineKeyboardButton(
-                text="Книги", callback_data=f"cat:{room_id}:books"
-            ),
-            InlineKeyboardButton(
-                text="Фильмы", callback_data=f"cat:{room_id}:movies"
-            ),
-            InlineKeyboardButton(
-                text="Сериалы", callback_data=f"cat:{room_id}:series"
-            ),
-            InlineKeyboardButton(
-                text="Всё", callback_data=f"cat:{room_id}:mixed"
-            ),
+            InlineKeyboardButton(text="Книги", callback_data=f"cat:{room_id}:books"),
+            InlineKeyboardButton(text="Фильмы", callback_data=f"cat:{room_id}:movies"),
+            InlineKeyboardButton(text="Сериалы", callback_data=f"cat:{room_id}:series"),
+            InlineKeyboardButton(text="Всё", callback_data=f"cat:{room_id}:mixed"),
+        ])
+        buttons.append([
+            InlineKeyboardButton(text="Ур.0", callback_data=f"lvl:{room_id}:0"),
+            InlineKeyboardButton(text="Ур.1", callback_data=f"lvl:{room_id}:1"),
+            InlineKeyboardButton(text="Ур.2", callback_data=f"lvl:{room_id}:2"),
+            InlineKeyboardButton(text="Ур.3", callback_data=f"lvl:{room_id}:3"),
         ])
     buttons.append([InlineKeyboardButton(
-        text="Покинуть", callback_data=f"leave:{room_id}"
-    )])
+        text="Покинуть", callback_data=f"leave:{room_id}")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-def join_keyboard(room_id: str) -> InlineKeyboardMarkup:
+def join_kb(room_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="Присоединиться", callback_data=f"join:{room_id}")
     ]])
 
 
-def guessing_characters_keyboard(
-    room_id: str, characters: list[dict], used_card_ids: set, assoc_card_id: str,
-) -> InlineKeyboardMarkup:
-    """Клавиатура с персонажами для угадывания."""
+def guess_chars_kb(room_id: str, characters: list[str],
+                   used: set, skull_id: str) -> InlineKeyboardMarkup:
     buttons = []
-    for ch in characters:
-        if ch["card_id"] in used_card_ids:
+    for i, ch in enumerate(characters):
+        if ch in used:
             continue
+        # callback_data макс 64 байт: g:ROOM:SKULL:idx
         buttons.append([InlineKeyboardButton(
-            text=ch["name"],
-            callback_data=f"g:{room_id}:{assoc_card_id}:{ch['card_id']}"
+            text=ch, callback_data=f"g:{room_id}:{skull_id}:{i}"
         )])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-# ═══════════════════════════════════════════
+# ═══════════════════════════════════════
 #  Таймеры
-# ═══════════════════════════════════════════
+# ═══════════════════════════════════════
 
-async def association_timeout(room_id: str, step: int, timeout: int):
-    """Таймер на шаг ассоциаций."""
+async def tooth_timeout(room_id: str, tooth: int, timeout: int):
     await asyncio.sleep(timeout)
     room = engine.rooms.get(room_id)
-    if not room or room.state != GameState.WRITING or room.current_step != step:
+    if not room or room.state != GameState.WRITING or room.current_tooth != tooth:
         return
-
-    logger.warning(f"Комната {room_id}: таймаут шага {step}")
-
-    # Пропускаем всех кто не ответил
-    pending = [uid for uid in room.players if uid not in room.step_submitted]
+    logger.warning(f"Комната {room_id}: таймаут зуба {tooth}")
+    pending = [uid for uid in room.players if uid not in room.tooth_submitted]
     for uid in pending:
         engine.skip_player(room_id, uid)
-        await send_dm(uid, "Время вышло! Твоя ассоциация пропущена.")
+        await send_dm(uid, "Время вышло! Слово пропущено.")
 
-    # Проверяем переход
-    room.current_step += 1
-    room.step_submitted.clear()
-
-    if room.current_step >= room.total_steps:
+    room.current_tooth += 1
+    room.tooth_submitted.clear()
+    if room.current_tooth >= TOTAL_TEETH:
         room.state = GameState.GUESSING
         room.guesses.clear()
         room.guessing_done.clear()
@@ -227,32 +201,27 @@ async def association_timeout(room_id: str, step: int, timeout: int):
         await send_writing_tasks(room)
 
 
-async def guessing_timeout(room_id: str, timeout: int):
-    """Таймер на угадывание."""
+async def guessing_timeout_fn(room_id: str, timeout: int):
     await asyncio.sleep(timeout)
     room = engine.rooms.get(room_id)
     if not room or room.state != GameState.GUESSING:
         return
-
-    logger.warning(f"Комната {room_id}: таймаут угадывания")
     engine.force_finish_guessing(room_id)
     await show_results(room)
 
 
-def start_timer(room_id: str, timer_key: str, coro):
-    """Запустить таймер, отменив предыдущий."""
-    key = f"{room_id}:{timer_key}"
-    if key in step_timers:
-        step_timers[key].cancel()
-    step_timers[key] = asyncio.create_task(coro)
+def start_timer(room_id: str, key: str, coro):
+    full_key = f"{room_id}:{key}"
+    if full_key in step_timers:
+        step_timers[full_key].cancel()
+    step_timers[full_key] = asyncio.create_task(coro)
 
 
-# ═══════════════════════════════════════════
+# ═══════════════════════════════════════
 #  Игровые фазы
-# ═══════════════════════════════════════════
+# ═══════════════════════════════════════
 
 async def send_writing_tasks(room):
-    """Разослать задания на текущий шаг ассоциаций."""
     room.status_message_id = None
     await update_group_status(room)
 
@@ -263,123 +232,123 @@ async def send_writing_tasks(room):
 
         if task["is_character"]:
             text = (
-                f"Тебе досталась карточка с персонажем:\n\n"
-                f"{task['visible_text']}\n\n"
-                f"Напиши ассоциацию с этим персонажем:"
+                f"Тебе достался персонаж:\n\n"
+                f"{task['visible']}\n\n"
+                f"Напиши ОДНО слово-ассоциацию:"
             )
         else:
             text = (
-                f"Шаг {room.current_step + 1}/{room.total_steps}\n\n"
-                f"Тебе передали карточку. На ней написано:\n\n"
-                f"\"{task['visible_text']}\"\n\n"
-                f"Напиши свою ассоциацию:"
+                f"Зуб {room.current_tooth + 1}/{TOTAL_TEETH}\n\n"
+                f"На черепе написано:\n\n"
+                f"\"{task['visible']}\"\n\n"
+                f"Стираешь это слово. Пиши ОДНО слово-ассоциацию:"
             )
+
+        if task.get("constraint"):
+            text += f"\n\nОграничение: {task['constraint'].value}"
+
         user_state[uid] = "writing"
         await send_dm(uid, text)
 
-    # Таймер
     start_timer(
-        room.room_id, f"step_{room.current_step}",
-        association_timeout(room.room_id, room.current_step, room.settings.association_timeout),
+        room.room_id, f"tooth_{room.current_tooth}",
+        tooth_timeout(room.room_id, room.current_tooth, room.settings.association_timeout),
     )
 
 
 async def start_guessing_phase(room):
-    """Начать фазу угадывания."""
     room.status_message_id = None
-
-    # Одинаковый порядок для всех
     data = engine.get_guessing_data(room)
 
     for uid in room.players:
         guessing_cache[uid] = {
-            "associations": data["associations"],
+            "skulls": data["skulls"],
             "characters": data["characters"],
             "room_id": room.room_id,
-            "used": set(),  # card_id персонажей уже использованных
+            "used_chars": set(),
             "current_idx": 0,
         }
         user_state[uid] = "guessing"
         await send_next_guess(uid)
 
     await update_group_status(room)
-
-    # Таймер
     start_timer(
         room.room_id, "guessing",
-        guessing_timeout(room.room_id, room.settings.guessing_timeout),
+        guessing_timeout_fn(room.room_id, room.settings.guessing_timeout),
     )
 
 
 async def send_next_guess(user_id: int):
-    """Отправить следующую ассоциацию для угадывания."""
     cache = guessing_cache.get(user_id)
     if not cache:
         return
 
     idx = cache["current_idx"]
-    associations = cache["associations"]
-    characters = cache["characters"]
+    skulls = cache["skulls"]
 
-    if idx >= len(associations):
-        await send_dm(user_id, "Ты сопоставил все карточки! Ждём остальных...")
+    if idx >= len(skulls):
+        await send_dm(user_id, "Все черепа сопоставлены! Ждём остальных...")
         return
 
-    assoc = associations[idx]
+    skull = skulls[idx]
     text = (
-        f"Сопоставь ассоциацию с персонажем ({idx + 1}/{len(associations)}):\n\n"
-        f"\"{assoc['text']}\"\n\n"
-        f"Кто это?"
+        f"Череп {idx + 1}/{len(skulls)}\n\n"
+        f"Последнее слово: \"{skull['last_word']}\"\n\n"
+        f"Какой это персонаж?"
     )
 
-    kb = guessing_characters_keyboard(
-        cache["room_id"], characters, cache["used"], assoc["card_id"],
+    kb = guess_chars_kb(
+        cache["room_id"], cache["characters"],
+        cache["used_chars"], skull["skull_id"],
     )
     await send_dm(user_id, text, reply_markup=kb)
 
 
 async def show_results(room):
-    """Показать результаты."""
     results = engine.calculate_results(room.room_id)
 
-    # Формируем текст результатов
-    lines = ["РЕЗУЛЬТАТЫ\n"]
-
-    # Счёт
-    sorted_scores = sorted(
-        results["scores"].items(),
-        key=lambda x: x[1],
-        reverse=True,
+    lines = [f"ДЕНЬ МЁРТВЫХ — РЕЗУЛЬТАТЫ\n"]
+    lines.append(f"Упокоено: {results['rested_count']}/{results['total_skulls']}")
+    lines.append(
+        f"Жетоны кости: {results['initial_bones']} стартовых "
+        f"+ {results['earned_bones']} заработано, "
+        f"использовано: {results['bones_used']}"
     )
-    lines.append("Очки:")
-    for i, (uid, score) in enumerate(sorted_scores):
-        medal = ["1.", "2.", "3."][i] if i < 3 else f"{i+1}."
-        player = room.players.get(uid)
-        name = player.first_name if player else "???"
-        lines.append(f"  {medal} {name}: {score}/{room.num_players}")
+    lines.append(f"Порог упокоения: {results['threshold']} из {room.num_players} правильных\n")
 
-    text_scores = "\n".join(lines)
+    # Оценка
+    ratio = results['rested_count'] / max(1, results['total_skulls'])
+    if ratio >= 1.0:
+        lines.append("ВСЕ МЁРТВЫЕ УПОКОЕНЫ! Buena suerte!")
+    elif ratio >= 0.75:
+        lines.append("Отличная работа команды!")
+    elif ratio >= 0.5:
+        lines.append("Неплохо, но можно лучше!")
+    else:
+        lines.append("Мёртвые беспокоятся... Попробуйте ещё раз!")
 
-    # Цепочки ассоциаций
-    chain_texts = []
-    for card_id, chain in results["chains"].items():
-        correct = results["correct_answers"][card_id]
-        chain_lines = [f"Персонаж: {correct}"]
-        for i, step in enumerate(chain):
-            chain_lines.append(f"  {i+1}. {step['author']}: \"{step['text']}\"")
-        last_assoc = chain[-1]["text"] if chain else "?"
-        chain_lines.append(f"  Финальная ассоциация: \"{last_assoc}\"")
-        chain_texts.append("\n".join(chain_lines))
+    lines.append("")
 
-    text_chains = "\n\n".join(chain_texts)
-    full_text = f"{text_scores}\n\n{'='*30}\nЦепочки ассоциаций:\n\n{text_chains}"
+    for s in results["skulls"]:
+        status = "УПОКОЕН" if s["rested"] else "БЕСПОКОЕН"
+        bones_info = f" (+{s.get('bones_used', 0)} кость)" if s.get('bones_used', 0) > 0 else ""
+        lines.append(f"--- {s['character']} [{status}{bones_info}]")
+        lines.append(f"  Последнее слово: \"{s['last_word']}\"")
+        lines.append(f"  Угадали: {s['correct_count']}/{room.num_players}")
 
-    # Отправляем всем в ЛС
+        # Цепочка ассоциаций
+        chain_words = " -> ".join(step["word"] for step in s["chain"])
+        lines.append(f"  Цепочка: {s['character']} -> {chain_words}")
+        lines.append("")
+
+    full_text = "\n".join(lines)
+
+    # Всем в ЛС
     for uid in room.players:
         user_state[uid] = None
         await send_dm(uid, full_text)
 
-    # В группу — только счёт
+    # В группу
     if room.group_chat_id:
         room.status_message_id = None
         try:
@@ -387,7 +356,15 @@ async def show_results(room):
         except Exception as e:
             logger.error(f"Ошибка отправки результатов в группу: {e}")
 
-    # Предложить новую игру
+    # Сохраняем в БД
+    store.save_room(room)
+    for uid in room.players:
+        store.save_result(
+            room.room_id, uid,
+            results['rested_count'], results['total_skulls'],
+        )
+
+    # Кнопка "ещё раз"
     if room.group_chat_id:
         kb = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="Ещё раз!", callback_data=f"restart:{room.room_id}")
@@ -397,12 +374,6 @@ async def show_results(room):
         except Exception:
             pass
 
-    # Сохраняем результаты в БД
-    for uid, score in results["scores"].items():
-        store.save_result(room.room_id, uid, score, room.num_players)
-    store.save_room(room)
-    logger.info(f"Результаты комнаты {room.room_id} сохранены в БД")
-
     # Очистка
     for uid in list(player_rooms.keys()):
         if player_rooms.get(uid) == room.room_id:
@@ -410,56 +381,53 @@ async def show_results(room):
     guessing_cache.clear()
 
 
-# ═══════════════════════════════════════════
+# ═══════════════════════════════════════
 #  Команды
-# ═══════════════════════════════════════════
+# ═══════════════════════════════════════
 
 @router.message(CommandStart())
 async def cmd_start(message: Message):
-    """Обработка /start — приветствие или присоединение к комнате."""
     args = message.text.split(maxsplit=1)
     if len(args) > 1 and args[1].startswith("join_"):
-        # Deep link: /start join_ABCD
         room_id = args[1].replace("join_", "").upper()
         await _join_room(message, room_id)
         return
 
     await message.answer(
-        "Привет! Я бот для игры Fiesta — цепочки ассоциаций.\n\n"
-        "Команды:\n"
+        "Fiesta: Карнавал мёртвых!\n\n"
+        "Кооперативная игра — угадайте персонажей по цепочкам ассоциаций.\n\n"
         "/create — создать комнату\n"
-        "/join КОД — присоединиться к комнате\n"
-        "/help — правила игры"
+        "/join КОД — присоединиться\n"
+        "/rules — правила\n"
+        "/stats — статистика"
     )
 
 
-@router.message(Command("help"))
-async def cmd_help(message: Message):
+@router.message(Command("rules"))
+async def cmd_rules(message: Message):
     await message.answer(
         "Правила Fiesta:\n\n"
-        "1. Каждый игрок получает карточку с персонажем\n"
-        "2. Ты пишешь ассоциацию с этим персонажем\n"
-        "3. Карточка передаётся дальше — следующий видит только твою ассоциацию "
-        "и пишет свою\n"
-        "4. Так по кругу, пока все не напишут\n"
-        "5. В конце видны только финальные ассоциации — нужно угадать, "
-        "какой персонаж за какой ассоциацией\n\n"
-        "Чем больше совпадений — тем больше очков!"
+        "1. Каждый берёт карточку с персонажем (тайно)\n"
+        "2. Пишешь ОДНО слово-ассоциацию с персонажем\n"
+        "3. Передаёшь череп соседу — он видит только твоё слово\n"
+        "4. Он стирает и пишет своё слово (ассоциацию на твоё)\n"
+        "5. Так 4 круга\n"
+        "6. В конце видны только последние слова + 8 персонажей\n"
+        "7. Все вместе сопоставляют слова с персонажами\n\n"
+        "Цель — упокоить как можно больше мёртвых!\n"
+        "Порог: нужно N-1 правильных ответов из N игроков.\n"
+        "Если все угадали — бонусный жетон кости!"
     )
 
 
 @router.message(Command("create"))
 async def cmd_create(message: Message):
-    """Создать комнату."""
     user_id = message.from_user.id
-
     if user_id in player_rooms:
-        await message.answer("Ты уже в комнате. Сначала выйди (/leave).")
+        await message.answer("Ты уже в комнате. Сначала /leave")
         return
 
     player = make_player(message)
-
-    # Проверяем ЛС
     dm_ok = await check_dm(user_id)
     player.dm_available = dm_ok
 
@@ -472,19 +440,18 @@ async def cmd_create(message: Message):
 
     text = (
         f"Комната создана! Код: {room.room_id}\n\n"
-        f"Ссылка для друзей:\n{join_link}\n\n"
-        f"Или команда: /join {room.room_id}\n\n"
+        f"Ссылка: {join_link}\n\n"
+        f"Или: /join {room.room_id}\n\n"
         f"Игроки: 1/{room.settings.max_players}\n"
-        f"Минимум для старта: {room.settings.min_players}"
+        f"Минимум: {room.settings.min_players}"
     )
 
     if not dm_ok:
-        text += "\n\nНапиши мне /start в личку, чтобы я мог отправлять тебе карточки!"
+        text += "\n\nНапиши мне /start в личку!"
 
-    kb = lobby_keyboard(room.room_id, is_host=True)
+    kb = lobby_kb(room.room_id, is_host=True)
     if group_chat_id:
-        kb2 = join_keyboard(room.room_id)
-        await message.answer(text, reply_markup=kb2)
+        await message.answer(text, reply_markup=join_kb(room.room_id))
         await send_dm(user_id, f"Ты создал комнату {room.room_id}", reply_markup=kb)
     else:
         await message.answer(text, reply_markup=kb)
@@ -492,23 +459,20 @@ async def cmd_create(message: Message):
 
 @router.message(Command("join"))
 async def cmd_join(message: Message):
-    """Присоединиться по команде /join КОД."""
     args = message.text.split()
     if len(args) < 2:
-        await message.answer("Укажи код комнаты: /join ABCD")
+        await message.answer("Укажи код: /join ABCD")
         return
     await _join_room(message, args[1].upper())
 
 
 async def _join_room(message: Message, room_id: str):
-    """Общая логика присоединения."""
     user_id = message.from_user.id
-
     if user_id in player_rooms:
         if player_rooms[user_id] == room_id:
             await message.answer("Ты уже в этой комнате!")
             return
-        await message.answer("Ты уже в другой комнате. Сначала выйди (/leave).")
+        await message.answer("Ты в другой комнате. Сначала /leave")
         return
 
     player = make_player(message)
@@ -523,238 +487,222 @@ async def _join_room(message: Message, room_id: str):
 
     player_rooms[user_id] = room.room_id
 
-    text = f"{player.first_name} присоединился! Игроков: {room.num_players}"
-    if not dm_ok:
-        text += f"\n\n{player.first_name}, напиши мне /start в личку!"
-
-    # Уведомить группу
     if room.group_chat_id:
         try:
-            await bot.send_message(room.group_chat_id, text)
+            await bot.send_message(
+                room.group_chat_id,
+                f"{player.first_name} в игре! ({room.num_players} игроков)"
+            )
         except Exception:
             pass
 
-    # Уведомить в ЛС
     is_host = user_id == room.host_id
-    kb = lobby_keyboard(room.room_id, is_host=is_host)
-    await send_dm(user_id, f"Ты в комнате {room.room_id}!", reply_markup=kb)
+    await send_dm(user_id, f"Ты в комнате {room.room_id}!",
+                  reply_markup=lobby_kb(room.room_id, is_host))
+
+    if not dm_ok:
+        bot_info = await bot.get_me()
+        await message.answer(f"{player.first_name}, напиши мне: t.me/{bot_info.username}")
 
     await update_group_status(room)
 
 
 @router.message(Command("stats"))
 async def cmd_stats(message: Message):
-    """Статистика игрока."""
     stats = store.get_player_stats(message.from_user.id)
     if stats["games"] == 0:
-        await message.answer("Ты ещё не играл! Создай комнату: /create")
+        await message.answer("Ты ещё не играл!")
         return
     await message.answer(
-        f"Твоя статистика:\n"
+        f"Статистика:\n"
         f"Игр: {stats['games']}\n"
-        f"Очков: {stats['total_score']}/{stats['total_possible']}\n"
-        f"Средний процент: {int(stats['avg_rate'] * 100)}%"
+        f"Упокоено: {stats['total_score']}/{stats['total_possible']}\n"
+        f"Средний %: {int(stats['avg_rate'] * 100)}%"
     )
 
 
 @router.message(Command("leave"))
 async def cmd_leave(message: Message):
-    """Покинуть комнату."""
     user_id = message.from_user.id
     room_id = player_rooms.get(user_id)
     if not room_id:
         await message.answer("Ты не в комнате.")
         return
-
     try:
         room, destroyed = engine.leave_room(room_id, user_id)
     except GameError as e:
         await message.answer(str(e))
         return
-
     del player_rooms[user_id]
     user_state.pop(user_id, None)
-    await message.answer("Ты вышел из комнаты.")
-
+    await message.answer("Ты вышел.")
     if not destroyed:
         await update_group_status(room)
 
 
-# ═══════════════════════════════════════════
-#  Callback queries
-# ═══════════════════════════════════════════
+# ═══════════════════════════════════════
+#  Callbacks
+# ═══════════════════════════════════════
 
 @router.callback_query(F.data.startswith("join:"))
-async def cb_join(callback: CallbackQuery):
-    room_id = callback.data.split(":")[1]
-    user_id = callback.from_user.id
+async def cb_join(cb: CallbackQuery):
+    room_id = cb.data.split(":")[1]
+    user_id = cb.from_user.id
 
     if user_id in player_rooms:
-        if player_rooms[user_id] == room_id:
-            await callback.answer("Ты уже в комнате!")
-            return
-        await callback.answer("Ты уже в другой комнате")
+        await cb.answer("Ты уже в комнате!" if player_rooms[user_id] == room_id
+                        else "Ты в другой комнате")
         return
 
-    player = make_player(callback)
+    player = make_player(cb)
     dm_ok = await check_dm(user_id)
     player.dm_available = dm_ok
 
     try:
         room = engine.join_room(room_id, player)
     except GameError as e:
-        await callback.answer(str(e), show_alert=True)
+        await cb.answer(str(e), show_alert=True)
         return
 
     player_rooms[user_id] = room.room_id
-    await callback.answer(f"Ты в комнате {room_id}!")
+    await cb.answer(f"Ты в комнате!")
 
     if not dm_ok:
         bot_info = await bot.get_me()
-        await callback.message.reply(
-            f"{player.first_name}, напиши мне в личку: t.me/{bot_info.username}"
-        )
+        if cb.message:
+            await cb.message.reply(f"{player.first_name}, напиши мне: t.me/{bot_info.username}")
 
-    # ЛС
-    is_host = user_id == room.host_id
-    kb = lobby_keyboard(room.room_id, is_host=is_host)
-    await send_dm(user_id, f"Ты в комнате {room.room_id}!", reply_markup=kb)
-
+    await send_dm(user_id, f"Ты в комнате {room.room_id}!",
+                  reply_markup=lobby_kb(room.room_id, False))
     await update_group_status(room)
 
 
 @router.callback_query(F.data.startswith("start:"))
-async def cb_start_game(callback: CallbackQuery):
-    room_id = callback.data.split(":")[1]
-    user_id = callback.from_user.id
-
+async def cb_start(cb: CallbackQuery):
+    room_id = cb.data.split(":")[1]
     try:
-        room = engine.start_game(room_id, user_id)
+        room = engine.start_game(room_id, cb.from_user.id)
     except GameError as e:
-        await callback.answer(str(e), show_alert=True)
+        await cb.answer(str(e), show_alert=True)
         return
 
-    await callback.answer("Игра началась!")
+    await cb.answer("Игра началась!")
 
-    # Уведомляем группу
     if room.group_chat_id:
         room.status_message_id = None
+        constraint_text = ""
+        if room.active_constraints:
+            names = ", ".join(c.value for c in room.active_constraints)
+            constraint_text = f"\nОграничения: {names}"
         try:
             await bot.send_message(
                 room.group_chat_id,
-                f"Игра началась! {room.num_players} игроков.\n"
+                f"Игра началась! {room.num_players} игроков.{constraint_text}\n"
+                f"Жетоны кости: {room.initial_bone_tokens}\n"
                 f"Проверяйте личные сообщения!"
             )
         except Exception:
             pass
 
-    # Рассылаем первые задания
     await send_writing_tasks(room)
 
 
 @router.callback_query(F.data.startswith("collect:"))
-async def cb_collect(callback: CallbackQuery):
-    room_id = callback.data.split(":")[1]
-    user_id = callback.from_user.id
-
+async def cb_collect(cb: CallbackQuery):
+    room_id = cb.data.split(":")[1]
     try:
-        room = engine.start_collecting(room_id, user_id)
+        room = engine.start_collecting(room_id, cb.from_user.id)
     except GameError as e:
-        await callback.answer(str(e), show_alert=True)
+        await cb.answer(str(e), show_alert=True)
         return
 
     room.settings.card_source = CardSource.MIXED
-    await callback.answer("Режим сбора персонажей!")
+    await cb.answer("Режим сбора!")
 
-    # Уведомляем всех в ЛС
     for uid in room.players:
         user_state[uid] = "adding_character"
-        await send_dm(
-            uid,
-            f"Добавь своих персонажей! Отправь имя персонажа текстом.\n"
-            f"Когда закончишь — напиши /done\n\n"
-            f"Уже добавлено: {len(room.custom_characters)}"
-        )
+        await send_dm(uid,
+            f"Добавь своих персонажей! Отправь имя текстом.\n"
+            f"/done когда закончишь.\n"
+            f"Уже: {len(room.custom_characters)}")
 
 
 @router.callback_query(F.data.startswith("cat:"))
-async def cb_category(callback: CallbackQuery):
-    parts = callback.data.split(":")
-    room_id = parts[1]
-    category = parts[2]
-
+async def cb_category(cb: CallbackQuery):
+    parts = cb.data.split(":")
+    room_id, category = parts[1], parts[2]
     room = engine.rooms.get(room_id)
-    if not room:
-        await callback.answer("Комната не найдена")
+    if not room or cb.from_user.id != room.host_id:
+        await cb.answer("Только хост")
         return
-    if callback.from_user.id != room.host_id:
-        await callback.answer("Только хост может менять категорию")
-        return
-
     room.settings.category = category
-    names = {"books": "Книги", "movies": "Фильмы", "series": "Сериалы", "mixed": "Всё подряд"}
-    await callback.answer(f"Категория: {names.get(category, category)}")
+    names = {"books": "Книги", "movies": "Фильмы", "series": "Сериалы", "mixed": "Всё"}
+    await cb.answer(f"Категория: {names.get(category, category)}")
+
+
+@router.callback_query(F.data.startswith("lvl:"))
+async def cb_level(cb: CallbackQuery):
+    parts = cb.data.split(":")
+    room_id, level = parts[1], int(parts[2])
+    room = engine.rooms.get(room_id)
+    if not room or cb.from_user.id != room.host_id:
+        await cb.answer("Только хост")
+        return
+    room.settings.difficulty_level = level
+    await cb.answer(f"Уровень сложности: {level}")
 
 
 @router.callback_query(F.data.startswith("leave:"))
-async def cb_leave(callback: CallbackQuery):
-    room_id = callback.data.split(":")[1]
-    user_id = callback.from_user.id
-
+async def cb_leave(cb: CallbackQuery):
+    room_id = cb.data.split(":")[1]
+    user_id = cb.from_user.id
     try:
         room, destroyed = engine.leave_room(room_id, user_id)
     except GameError as e:
-        await callback.answer(str(e), show_alert=True)
+        await cb.answer(str(e), show_alert=True)
         return
-
     player_rooms.pop(user_id, None)
     user_state.pop(user_id, None)
-    await callback.answer("Ты вышел из комнаты")
-
+    await cb.answer("Ты вышел")
     if not destroyed:
         await update_group_status(room)
 
 
 @router.callback_query(F.data.startswith("g:"))
-async def cb_guess(callback: CallbackQuery):
-    """Обработка угадывания: g:ROOM:assoc_card_id:char_card_id"""
-    parts = callback.data.split(":")
+async def cb_guess(cb: CallbackQuery):
+    """g:ROOM:SKULL_ID:char_idx"""
+    parts = cb.data.split(":")
     if len(parts) != 4:
-        await callback.answer("Ошибка данных")
+        await cb.answer("Ошибка")
         return
 
-    room_id = parts[1]
-    assoc_card_id = parts[2]
-    char_card_id = parts[3]
-    user_id = callback.from_user.id
+    room_id, skull_id, char_idx = parts[1], parts[2], int(parts[3])
+    user_id = cb.from_user.id
 
-    try:
-        result = engine.submit_guess(room_id, user_id, assoc_card_id, char_card_id)
-    except GameError as e:
-        await callback.answer(str(e), show_alert=True)
-        return
-
-    # Обновляем кэш
     cache = guessing_cache.get(user_id)
-    if cache:
-        cache["used"].add(char_card_id)
-        cache["current_idx"] += 1
+    if not cache:
+        await cb.answer("Нет данных")
+        return
 
-    # Получаем имя персонажа для подтверждения
-    room = engine.rooms.get(room_id)
-    char_card = room.cards.get(char_card_id) if room else None
-    char_name = char_card.character if char_card else "???"
+    character = cache["characters"][char_idx]
 
-    await callback.answer(f"Выбрано: {char_name}")
-
-    # Удаляем старое сообщение с кнопками
     try:
-        await callback.message.delete()
+        result = engine.submit_guess(room_id, user_id, skull_id, character)
+    except GameError as e:
+        await cb.answer(str(e), show_alert=True)
+        return
+
+    cache["used_chars"].add(character)
+    cache["current_idx"] += 1
+
+    await cb.answer(f"Выбрано: {character}")
+
+    try:
+        await cb.message.delete()
     except Exception:
         pass
 
     if result["guess_count"] < result["total"]:
-        # Следующая ассоциация
         await send_next_guess(user_id)
     else:
         await send_dm(user_id, "Готово! Ждём остальных...")
@@ -770,96 +718,89 @@ async def cb_guess(callback: CallbackQuery):
 
 
 @router.callback_query(F.data.startswith("restart:"))
-async def cb_restart(callback: CallbackQuery):
-    """Перезапуск игры в той же комнате."""
-    room_id = callback.data.split(":")[1]
+async def cb_restart(cb: CallbackQuery):
+    room_id = cb.data.split(":")[1]
     room = engine.rooms.get(room_id)
     if not room:
-        # Воссоздаём комнату
-        await callback.answer("Комната закрыта. Создай новую: /create")
+        await cb.answer("Комната закрыта. /create")
         return
 
     room.state = GameState.LOBBY
-    room.cards.clear()
+    room.skulls.clear()
     room.custom_characters.clear()
-    room.step_submitted.clear()
+    room.tooth_submitted.clear()
     room.guesses.clear()
     room.guessing_done.clear()
     room.guessing_progress.clear()
-    room.current_step = 0
+    room.skull_scores.clear()
+    room.decoy_characters.clear()
+    room.all_characters.clear()
+    room.active_constraints.clear()
+    room.current_tooth = 0
+    room.bone_tokens = 0
     room.status_message_id = None
 
-    # Все игроки снова в комнате
     for uid in room.players:
         player_rooms[uid] = room.room_id
 
-    await callback.answer("Новый раунд!")
+    await cb.answer("Новый раунд!")
     await update_group_status(room)
-
-    # Хосту — панель
-    kb = lobby_keyboard(room.room_id, is_host=True)
-    await send_dm(room.host_id, f"Комната {room.room_id} готова к новой игре!", reply_markup=kb)
+    await send_dm(room.host_id, f"Комната {room.room_id} готова!",
+                  reply_markup=lobby_kb(room.room_id, True))
 
 
-# ═══════════════════════════════════════════
-#  Текстовые сообщения (ассоциации / персонажи)
-# ═══════════════════════════════════════════
+# ═══════════════════════════════════════
+#  Текстовые сообщения
+# ═══════════════════════════════════════
 
 @router.message(Command("done"))
 async def cmd_done(message: Message):
-    """Завершить добавление персонажей."""
     user_id = message.from_user.id
     if user_state.get(user_id) != "adding_character":
         return
-
     user_state[user_id] = None
     room_id = player_rooms.get(user_id)
     room = engine.rooms.get(room_id) if room_id else None
     if room:
-        await message.answer(
-            f"Готово! Добавлено персонажей: {len(room.custom_characters)}"
-        )
+        await message.answer(f"Готово! Персонажей: {len(room.custom_characters)}")
 
 
 @router.message(F.chat.type == "private")
-async def handle_private_text(message: Message):
-    """Обработка текста в ЛС — ассоциации или добавление персонажей."""
+async def handle_private(message: Message):
     user_id = message.from_user.id
     state = user_state.get(user_id)
 
     if state == "writing":
-        await _handle_association(message)
+        await _handle_word(message)
     elif state == "adding_character":
-        await _handle_add_character(message)
+        await _handle_add_char(message)
     else:
-        # Если игрок не в активной фазе — обычное сообщение
         if user_id in player_rooms:
-            await message.answer("Сейчас не твой ход. Жди свою очередь!")
+            await message.answer("Жди свою очередь!")
         else:
-            await message.answer("Создай комнату (/create) или присоединись (/join КОД)")
+            await message.answer("/create или /join КОД")
 
 
-async def _handle_association(message: Message):
-    """Обработка ассоциации от игрока."""
+async def _handle_word(message: Message):
     user_id = message.from_user.id
     room_id = player_rooms.get(user_id)
     if not room_id:
         await message.answer("Ты не в комнате")
         return
 
-    text = message.text.strip()
+    text = message.text.strip() if message.text else ""
     if not text:
-        await message.answer("Отправь текстовую ассоциацию")
+        await message.answer("Отправь одно слово")
         return
 
     try:
-        result = engine.submit_association(room_id, user_id, text)
+        result = engine.submit_word(room_id, user_id, text)
     except GameError as e:
-        await message.answer(str(e))
+        await message.answer(f"{e}\nПопробуй другое слово:")
         return
 
     user_state[user_id] = None
-    await message.answer("Ассоциация принята!")
+    await message.answer("Принято!")
 
     room = engine.rooms.get(room_id)
     if not room:
@@ -868,46 +809,36 @@ async def _handle_association(message: Message):
     await update_group_status(room)
 
     if result["game_phase_changed"]:
-        # Переход к угадыванию
         await start_guessing_phase(room)
-    elif result["step_complete"]:
-        # Следующий шаг
+    elif result["tooth_complete"]:
         await send_writing_tasks(room)
 
 
-async def _handle_add_character(message: Message):
-    """Обработка добавления персонажа."""
+async def _handle_add_char(message: Message):
     user_id = message.from_user.id
     room_id = player_rooms.get(user_id)
     if not room_id:
         return
-
     try:
         room = engine.add_custom_character(room_id, user_id, message.text)
-        await message.answer(
-            f"Добавлено: {message.text.strip()}\n"
-            f"Всего: {len(room.custom_characters)}\n"
-            f"Ещё? Или /done"
-        )
+        await message.answer(f"Добавлено: {message.text.strip()}\nВсего: {len(room.custom_characters)}\nЕщё? /done")
     except GameError as e:
         await message.answer(str(e))
 
 
-# ═══════════════════════════════════════════
+# ═══════════════════════════════════════
 #  Запуск
-# ═══════════════════════════════════════════
+# ═══════════════════════════════════════
 
 async def main():
     logger.info("Fiesta Bot запускается...")
 
-    # Очистка старых комнат каждые 10 минут
     async def cleanup_loop():
         while True:
             await asyncio.sleep(600)
             engine.cleanup_stale_rooms()
 
     asyncio.create_task(cleanup_loop())
-
     await dp.start_polling(bot)
 
 
