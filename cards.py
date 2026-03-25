@@ -1,140 +1,132 @@
 """
 Банк персонажей для игры Fiesta.
+~580 персонажей по 8 категориям.
 """
 
 import json
 import logging
-import os
 import random
 import re
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_CHARACTERS = {
-    "books": [
-        "Шерлок Холмс", "Гарри Поттер", "Дон Кихот", "Анна Каренина",
-        "Родион Раскольников", "Гэндальф", "Фродо Бэггинс", "Остап Бендер",
-        "Мастер", "Маргарита", "Воланд", "Кот Бегемот",
-        "Онегин", "Татьяна Ларина", "Печорин", "Ромео",
-        "Джульетта", "Гамлет", "Дракула", "Франкенштейн",
-        "Алиса (Страна чудес)", "Винни-Пух", "Карлсон", "Незнайка",
-        "Д'Артаньян", "Граф Монте-Кристо", "Робинзон Крузо", "Маленький принц",
-        "Чиполлино", "Буратино", "Мэри Поппинс", "Питер Пэн",
-    ],
-    "movies": [
-        "Дарт Вейдер", "Йода", "Индиана Джонс", "Джеймс Бонд",
-        "Терминатор", "Нео (Матрица)", "Форрест Гамп", "Джокер",
-        "Бэтмен", "Человек-паук", "Железный человек", "Тор",
-        "Танос", "Джек Воробей", "Шрек", "Кунг-фу Панда",
-        "Леон (киллер)", "Тайлер Дёрден", "Ганнибал Лектер", "Вито Корлеоне",
-        "Марти Макфлай", "Эдвард Руки-ножницы", "Элли (Волшебник Изумрудного города)",
-        "Балрог", "Голлум", "Рокки Бальбоа", "Джон Уик",
-    ],
-    "series": [
-        "Уолтер Уайт", "Шелдон Купер", "Дейенерис Таргариен", "Джон Сноу",
-        "Тирион Ланнистер", "Гомер Симпсон", "Рик Санчез", "Морти Смит",
-        "Декстер Морган", "Доктор Хаус", "Шерлок (Камбербэтч)", "Одиннадцатый Доктор",
-        "Лайт Ягами", "Наруто", "Луффи", "Геральт из Ривии",
-        "Сол Гудман", "Джесси Пинкман", "Тони Сопрано", "Томас Шелби",
-        "Рейчел Грин", "Барни Стинсон", "Майкл Скотт", "Дуайт Шрут",
-    ],
-}
+CHARACTERS_FILE = Path(__file__).parent / "characters.json"
+
+_characters_cache: dict[str, list[str]] | None = None
+
+
+def _load_characters() -> dict[str, list[str]]:
+    global _characters_cache
+    if _characters_cache is not None:
+        return _characters_cache
+
+    try:
+        with open(CHARACTERS_FILE, 'r', encoding='utf-8') as f:
+            _characters_cache = json.load(f)
+        total = sum(len(v) for v in _characters_cache.values())
+        logger.info(f"Загружено {total} персонажей из {len(_characters_cache)} категорий")
+    except Exception as e:
+        logger.error(f"Ошибка загрузки characters.json: {e}")
+        _characters_cache = {}
+    return _characters_cache
 
 
 def _normalize(text: str) -> str:
-    """Нормализация строки персонажа."""
     text = text.strip()
     text = re.sub(r'\s+', ' ', text)
-    # Убираем лишние кавычки
     text = text.strip('"\'«»')
     return text
 
 
 def _validate_character(text: str) -> bool:
-    """Проверка валидности персонажа."""
-    if not text or len(text) < 2:
+    if not text or len(text) < 2 or len(text) > 100:
         return False
-    if len(text) > 100:
-        return False
-    # Только пробелы/пунктуация
     if not re.search(r'[a-zA-Zа-яА-ЯёЁ]', text):
         return False
     return True
 
 
-def get_characters(category: str = "mixed", count: int = 10,
+# Маппинг категорий на ключи в JSON
+CATEGORY_MAP = {
+    "mixed": None,           # все
+    "books": ["books"],
+    "movies": ["movies"],
+    "series": ["series"],
+    "cartoons": ["cartoons"],
+    "anime": ["anime"],
+    "games": ["games"],
+    "mythology": ["mythology"],
+    "history": ["history"],
+    "fiction": ["books", "movies", "series", "cartoons", "anime", "games"],
+    "real": ["history", "mythology"],
+}
+
+
+def get_characters(category: str = "mixed", count: int = 8,
                    custom: list[str] | None = None,
                    source: str = "default") -> list[str]:
     """
-    Получить список персонажей для игры.
+    Получить список уникальных персонажей.
 
     Args:
-        category: "books", "movies", "series", "mixed"
-        count: сколько персонажей нужно
+        category: ключ из CATEGORY_MAP или "mixed"
+        count: сколько нужно
         custom: пользовательские персонажи
         source: "default", "custom", "mixed"
-
-    Returns:
-        Список уникальных персонажей
     """
     pool: list[str] = []
+    chars_db = _load_characters()
 
-    # Встроенный банк
     if source in ("default", "mixed"):
-        if category == "mixed":
-            for chars in DEFAULT_CHARACTERS.values():
+        cats = CATEGORY_MAP.get(category)
+        if cats is None:
+            # Все категории
+            for chars in chars_db.values():
                 pool.extend(chars)
-        elif category in DEFAULT_CHARACTERS:
-            pool.extend(DEFAULT_CHARACTERS[category])
         else:
-            for chars in DEFAULT_CHARACTERS.values():
-                pool.extend(chars)
+            for cat_key in cats:
+                pool.extend(chars_db.get(cat_key, []))
 
-    # Пользовательский банк
     if source in ("custom", "mixed") and custom:
         for c in custom:
             normalized = _normalize(c)
             if _validate_character(normalized):
                 pool.append(normalized)
 
-    # Дедупликация (case-insensitive)
+    # Дедупликация
     seen = set()
-    unique_pool = []
+    unique = []
     for c in pool:
-        key = c.lower()
+        key = c.lower().strip()
         if key not in seen:
             seen.add(key)
-            unique_pool.append(c)
+            unique.append(c)
 
-    if len(unique_pool) < count:
-        logger.warning(f"В банке только {len(unique_pool)} персонажей, нужно {count}")
-        # Добавляем из всех категорий
-        for chars in DEFAULT_CHARACTERS.values():
+    if len(unique) < count:
+        logger.warning(f"Мало персонажей: {len(unique)}, нужно {count}. Добираем из всех.")
+        for chars in chars_db.values():
             for c in chars:
-                key = c.lower()
+                key = c.lower().strip()
                 if key not in seen:
                     seen.add(key)
-                    unique_pool.append(c)
+                    unique.append(c)
 
-    random.shuffle(unique_pool)
-    result = unique_pool[:count]
+    random.shuffle(unique)
+    result = unique[:count]
     logger.info(f"Выдано {len(result)} персонажей (source={source}, category={category})")
     return result
 
 
-def load_custom_bank(filepath: str) -> list[str]:
-    """Загрузить пользовательский банк из JSON."""
-    try:
-        with open(filepath, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        if isinstance(data, list):
-            chars = data
-        elif isinstance(data, dict) and "cards" in data:
-            chars = data["cards"]
-        else:
-            return []
-        return [_normalize(c) for c in chars if _validate_character(_normalize(str(c)))]
-    except Exception as e:
-        logger.error(f"Ошибка загрузки банка {filepath}: {e}")
-        return []
+def get_all_categories() -> list[str]:
+    """Список доступных категорий."""
+    return list(_load_characters().keys())
+
+
+def get_category_count(category: str = "mixed") -> int:
+    """Сколько персонажей в категории."""
+    chars_db = _load_characters()
+    cats = CATEGORY_MAP.get(category)
+    if cats is None:
+        return sum(len(v) for v in chars_db.values())
+    return sum(len(chars_db.get(k, [])) for k in cats)
