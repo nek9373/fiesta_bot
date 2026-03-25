@@ -1,6 +1,5 @@
 """
-SQLite хранилище для Fiesta.
-Сохраняет комнаты, игроков, карточки, ассоциации, результаты.
+SQLite хранилище для Fiesta: Карнавал мёртвых.
 """
 
 from __future__ import annotations
@@ -13,7 +12,7 @@ from pathlib import Path
 from typing import Optional
 
 from models import (
-    Association, Card, CardSource, GameState, Player, Room, RoomSettings,
+    AssociationStep, CardSource, GameState, Player, Room, RoomSettings, Skull,
 )
 
 logger = logging.getLogger(__name__)
@@ -44,7 +43,11 @@ class FiestaStore:
             settings_json TEXT NOT NULL DEFAULT '{}',
             player_order_json TEXT NOT NULL DEFAULT '[]',
             custom_characters_json TEXT NOT NULL DEFAULT '[]',
-            current_step INTEGER NOT NULL DEFAULT 0,
+            all_characters_json TEXT NOT NULL DEFAULT '[]',
+            decoy_characters_json TEXT NOT NULL DEFAULT '[]',
+            current_tooth INTEGER NOT NULL DEFAULT 0,
+            bone_tokens INTEGER NOT NULL DEFAULT 0,
+            initial_bone_tokens INTEGER NOT NULL DEFAULT 0,
             created_at REAL NOT NULL,
             last_activity REAL NOT NULL
         );
@@ -61,30 +64,31 @@ class FiestaStore:
             FOREIGN KEY (room_id) REFERENCES rooms(room_id) ON DELETE CASCADE
         );
 
-        CREATE TABLE IF NOT EXISTS cards (
-            card_id TEXT PRIMARY KEY,
+        CREATE TABLE IF NOT EXISTS skulls (
+            skull_id TEXT PRIMARY KEY,
             room_id TEXT NOT NULL,
             character TEXT NOT NULL,
             owner_id INTEGER NOT NULL,
+            teeth_filled INTEGER NOT NULL DEFAULT 0,
             FOREIGN KEY (room_id) REFERENCES rooms(room_id) ON DELETE CASCADE
         );
 
-        CREATE TABLE IF NOT EXISTS associations (
+        CREATE TABLE IF NOT EXISTS steps (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            card_id TEXT NOT NULL,
+            skull_id TEXT NOT NULL,
             author_id INTEGER NOT NULL,
-            text TEXT NOT NULL,
+            word TEXT NOT NULL,
             step INTEGER NOT NULL,
             written_at REAL NOT NULL,
-            FOREIGN KEY (card_id) REFERENCES cards(card_id) ON DELETE CASCADE
+            FOREIGN KEY (skull_id) REFERENCES skulls(skull_id) ON DELETE CASCADE
         );
 
         CREATE TABLE IF NOT EXISTS guesses (
             user_id INTEGER NOT NULL,
             room_id TEXT NOT NULL,
-            card_id TEXT NOT NULL,
+            skull_id TEXT NOT NULL,
             guessed_character TEXT NOT NULL,
-            PRIMARY KEY (user_id, room_id, card_id),
+            PRIMARY KEY (user_id, room_id, skull_id),
             FOREIGN KEY (room_id) REFERENCES rooms(room_id) ON DELETE CASCADE
         );
 
@@ -98,18 +102,15 @@ class FiestaStore:
         );
 
         CREATE INDEX IF NOT EXISTS idx_players_room ON players(room_id);
-        CREATE INDEX IF NOT EXISTS idx_cards_room ON cards(room_id);
-        CREATE INDEX IF NOT EXISTS idx_assoc_card ON associations(card_id);
+        CREATE INDEX IF NOT EXISTS idx_skulls_room ON skulls(room_id);
+        CREATE INDEX IF NOT EXISTS idx_steps_skull ON steps(skull_id);
         CREATE INDEX IF NOT EXISTS idx_results_user ON game_results(user_id);
         """)
         conn.commit()
         conn.close()
         logger.info(f"БД инициализирована: {self.db_path}")
 
-    # ─── Сохранение / загрузка комнат ───
-
     def save_room(self, room: Room):
-        """Сохранить полное состояние комнаты."""
         conn = self._conn()
         try:
             settings = {
@@ -119,20 +120,25 @@ class FiestaStore:
                 "guessing_timeout": room.settings.guessing_timeout,
                 "card_source": room.settings.card_source.value,
                 "category": room.settings.category,
+                "difficulty_level": room.settings.difficulty_level,
             }
 
             conn.execute("""
                 INSERT OR REPLACE INTO rooms
                 (room_id, host_id, group_chat_id, state, settings_json,
-                 player_order_json, custom_characters_json, current_step,
-                 created_at, last_activity)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 player_order_json, custom_characters_json, all_characters_json,
+                 decoy_characters_json, current_tooth, bone_tokens,
+                 initial_bone_tokens, created_at, last_activity)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 room.room_id, room.host_id, room.group_chat_id,
                 room.state.value, json.dumps(settings),
                 json.dumps(room.player_order),
                 json.dumps(room.custom_characters),
-                room.current_step,
+                json.dumps(room.all_characters),
+                json.dumps(room.decoy_characters),
+                room.current_tooth, room.bone_tokens,
+                room.initial_bone_tokens,
                 room.created_at, room.last_activity,
             ))
 
@@ -146,115 +152,42 @@ class FiestaStore:
                 """, (p.user_id, room.room_id, p.username, p.first_name,
                       int(p.is_host), int(p.dm_available), p.joined_at))
 
-            # Карточки и ассоциации
+            # Черепа и шаги
             conn.execute(
-                "DELETE FROM associations WHERE card_id IN "
-                "(SELECT card_id FROM cards WHERE room_id = ?)",
+                "DELETE FROM steps WHERE skull_id IN "
+                "(SELECT skull_id FROM skulls WHERE room_id = ?)",
                 (room.room_id,)
             )
-            conn.execute("DELETE FROM cards WHERE room_id = ?", (room.room_id,))
+            conn.execute("DELETE FROM skulls WHERE room_id = ?", (room.room_id,))
 
-            for card in room.cards.values():
+            for skull in room.skulls.values():
                 conn.execute("""
-                    INSERT INTO cards (card_id, room_id, character, owner_id)
-                    VALUES (?, ?, ?, ?)
-                """, (card.card_id, room.room_id, card.character, card.owner_id))
+                    INSERT INTO skulls (skull_id, room_id, character, owner_id, teeth_filled)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (skull.skull_id, room.room_id, skull.character,
+                      skull.owner_id, skull.teeth_filled))
 
-                for assoc in card.associations:
+                for step in skull.steps:
                     conn.execute("""
-                        INSERT INTO associations (card_id, author_id, text, step, written_at)
+                        INSERT INTO steps (skull_id, author_id, word, step, written_at)
                         VALUES (?, ?, ?, ?, ?)
-                    """, (card.card_id, assoc.author_id, assoc.text,
-                          assoc.step, assoc.written_at))
+                    """, (skull.skull_id, step.author_id, step.word,
+                          step.step, step.written_at))
 
             # Угадывания
             conn.execute("DELETE FROM guesses WHERE room_id = ?", (room.room_id,))
             for uid, guesses in room.guesses.items():
-                for card_id, character in guesses.items():
+                for skull_id, character in guesses.items():
                     conn.execute("""
-                        INSERT INTO guesses (user_id, room_id, card_id, guessed_character)
+                        INSERT INTO guesses (user_id, room_id, skull_id, guessed_character)
                         VALUES (?, ?, ?, ?)
-                    """, (uid, room.room_id, card_id, character))
+                    """, (uid, room.room_id, skull_id, character))
 
             conn.commit()
         finally:
             conn.close()
 
-    def load_room(self, room_id: str) -> Optional[Room]:
-        """Загрузить комнату из БД."""
-        conn = self._conn()
-        try:
-            row = conn.execute("SELECT * FROM rooms WHERE room_id = ?", (room_id,)).fetchone()
-            if not row:
-                return None
-
-            settings_data = json.loads(row["settings_json"])
-            settings = RoomSettings(
-                min_players=settings_data.get("min_players", 3),
-                max_players=settings_data.get("max_players", 10),
-                association_timeout=settings_data.get("association_timeout", 120),
-                guessing_timeout=settings_data.get("guessing_timeout", 300),
-                card_source=CardSource(settings_data.get("card_source", "default")),
-                category=settings_data.get("category", "mixed"),
-            )
-
-            room = Room(
-                room_id=row["room_id"],
-                host_id=row["host_id"],
-                group_chat_id=row["group_chat_id"],
-                state=GameState(row["state"]),
-                settings=settings,
-                player_order=json.loads(row["player_order_json"]),
-                custom_characters=json.loads(row["custom_characters_json"]),
-                current_step=row["current_step"],
-                created_at=row["created_at"],
-                last_activity=row["last_activity"],
-            )
-
-            # Игроки
-            for p_row in conn.execute("SELECT * FROM players WHERE room_id = ?", (room_id,)):
-                room.players[p_row["user_id"]] = Player(
-                    user_id=p_row["user_id"],
-                    username=p_row["username"],
-                    first_name=p_row["first_name"],
-                    is_host=bool(p_row["is_host"]),
-                    dm_available=bool(p_row["dm_available"]),
-                    joined_at=p_row["joined_at"],
-                )
-
-            # Карточки
-            for c_row in conn.execute("SELECT * FROM cards WHERE room_id = ?", (room_id,)):
-                card = Card(
-                    card_id=c_row["card_id"],
-                    character=c_row["character"],
-                    owner_id=c_row["owner_id"],
-                )
-                # Ассоциации
-                for a_row in conn.execute(
-                    "SELECT * FROM associations WHERE card_id = ? ORDER BY step",
-                    (c_row["card_id"],)
-                ):
-                    card.associations.append(Association(
-                        author_id=a_row["author_id"],
-                        text=a_row["text"],
-                        step=a_row["step"],
-                        written_at=a_row["written_at"],
-                    ))
-                room.cards[card.card_id] = card
-
-            # Угадывания
-            for g_row in conn.execute("SELECT * FROM guesses WHERE room_id = ?", (room_id,)):
-                uid = g_row["user_id"]
-                if uid not in room.guesses:
-                    room.guesses[uid] = {}
-                room.guesses[uid][g_row["card_id"]] = g_row["guessed_character"]
-
-            return room
-        finally:
-            conn.close()
-
     def save_result(self, room_id: str, user_id: int, score: int, total: int):
-        """Сохранить результат игры."""
         conn = self._conn()
         try:
             conn.execute("""
@@ -266,7 +199,6 @@ class FiestaStore:
             conn.close()
 
     def get_player_stats(self, user_id: int) -> dict:
-        """Статистика игрока."""
         conn = self._conn()
         try:
             rows = conn.execute("""
@@ -275,7 +207,6 @@ class FiestaStore:
                        AVG(CAST(score AS REAL) / total) as avg_rate
                 FROM game_results WHERE user_id = ?
             """, (user_id,)).fetchone()
-
             return {
                 "games": rows["games"] or 0,
                 "total_score": rows["total_score"] or 0,
@@ -286,7 +217,6 @@ class FiestaStore:
             conn.close()
 
     def delete_room(self, room_id: str):
-        """Удалить комнату."""
         conn = self._conn()
         try:
             conn.execute("DELETE FROM rooms WHERE room_id = ?", (room_id,))
