@@ -39,6 +39,62 @@ dp.include_router(router)
 engine = GameEngine()
 store = FiestaStore()
 
+# ═══════════════════════════════════════
+#  Калавера — персонаж-ведущий
+# ═══════════════════════════════════════
+# Калавера — скелет-распорядитель карнавала мёртвых.
+# Весёлый, немного зловещий, говорит с мексиканским колоритом.
+# Его работа — проводить карнавал, следить за порядком и веселить гостей.
+
+CALAVERA_PHRASES = {
+    "welcome": [
+        "Bienvenidos al Carnaval de los Muertos! Я — Калавера, распорядитель карнавала. Здесь мы чтим память мёртвых через игру и смех!",
+        "Hola, amigos! Калавера к вашим услугам. Сегодня мы будем вспоминать великих... и немного путать их имена!",
+    ],
+    "game_start": [
+        "Карнавал начинается! Каждый из вас получит карточку с персонажем. Запомните его — и придумайте слово, которое поможет его узнать... или запутает всех!",
+        "Музыка играет, маски надеты! Черепа готовы — пора писать ассоциации. Одно слово, amigos, всего одно!",
+    ],
+    "new_tooth": [
+        "Новый круг! Стирайте старое, пишите новое. Только одно слово — пусть оно будет ярким!",
+        "Черепа передаются дальше! Прочитайте слово, забудьте его, напишите своё. Так работает карнавал!",
+        "Ещё один зуб закрашен! Дальше, дальше — мертвецы ждут!",
+    ],
+    "guessing_start": [
+        "Hora de adivinar! Время угадывать! Перед вами черепа с последними словами и список персонажей. Кто кому принадлежит?",
+        "Черепа разложены, персонажи перемешаны. Тишина, amigos — думайте молча!",
+    ],
+    "all_rested": [
+        "Todos en paz! Все мёртвые упокоены! Карнавал удался на славу! Мексиканские скелеты танцуют от радости!",
+    ],
+    "good_result": [
+        "Muy bien! Отличная работа, amigos! Почти все мёртвые спят спокойно.",
+    ],
+    "ok_result": [
+        "No está mal! Неплохо, но некоторые мертвецы всё ещё беспокоятся. Попробуем ещё?",
+    ],
+    "bad_result": [
+        "Ay, caramba! Мертвецы недовольны... Но ничего, на карнавале всегда есть второй шанс!",
+    ],
+    "timeout": [
+        "Время вышло! На карнавале нельзя опаздывать — мертвецы не ждут!",
+    ],
+    "player_joined": [
+        "Ещё один гость на карнавале! Добро пожаловать!",
+        "Nuevo amigo! Чем больше гостей, тем веселее карнавал!",
+    ],
+    "bone_token": [
+        "Жетон кости заработан! Все угадали — мертвец доволен!",
+    ],
+}
+
+import random as _rnd
+
+def calavera(key: str) -> str:
+    """Случайная фраза Калаверы."""
+    phrases = CALAVERA_PHRASES.get(key, ["..."])
+    return _rnd.choice(phrases)
+
 # user_id -> room_id
 player_rooms: dict[int, str] = {}
 # user_id -> состояние
@@ -238,6 +294,7 @@ async def send_writing_tasks(room):
             )
         else:
             text = (
+                f"{calavera('new_tooth')}\n\n"
                 f"Зуб {room.current_tooth + 1}/{TOTAL_TEETH}\n\n"
                 f"На черепе написано:\n\n"
                 f"\"{task['visible']}\"\n\n"
@@ -291,7 +348,9 @@ async def send_next_guess(user_id: int):
         return
 
     skull = skulls[idx]
+    intro = calavera('guessing_start') + "\n\n" if idx == 0 else ""
     text = (
+        f"{intro}"
         f"Череп {idx + 1}/{len(skulls)}\n\n"
         f"Последнее слово: \"{skull['last_word']}\"\n\n"
         f"Какой это персонаж?"
@@ -316,16 +375,16 @@ async def show_results(room):
     )
     lines.append(f"Порог упокоения: {results['threshold']} из {room.num_players} правильных\n")
 
-    # Оценка
+    # Оценка от Калаверы
     ratio = results['rested_count'] / max(1, results['total_skulls'])
     if ratio >= 1.0:
-        lines.append("ВСЕ МЁРТВЫЕ УПОКОЕНЫ! Buena suerte!")
+        lines.append(calavera('all_rested'))
     elif ratio >= 0.75:
-        lines.append("Отличная работа команды!")
+        lines.append(calavera('good_result'))
     elif ratio >= 0.5:
-        lines.append("Неплохо, но можно лучше!")
+        lines.append(calavera('ok_result'))
     else:
-        lines.append("Мёртвые беспокоятся... Попробуйте ещё раз!")
+        lines.append(calavera('bad_result'))
 
     lines.append("")
 
@@ -394,8 +453,7 @@ async def cmd_start(message: Message):
         return
 
     await message.answer(
-        "Fiesta: Карнавал мёртвых!\n\n"
-        "Кооперативная игра — угадайте персонажей по цепочкам ассоциаций.\n\n"
+        f"{calavera('welcome')}\n\n"
         "/create — создать комнату\n"
         "/join КОД — присоединиться\n"
         "/rules — правила\n"
@@ -597,7 +655,8 @@ async def cb_start(cb: CallbackQuery):
         try:
             await bot.send_message(
                 room.group_chat_id,
-                f"Игра началась! {room.num_players} игроков.{constraint_text}\n"
+                f"{calavera('game_start')}\n\n"
+                f"Игроков: {room.num_players}{constraint_text}\n"
                 f"Жетоны кости: {room.initial_bone_tokens}\n"
                 f"Проверяйте личные сообщения!"
             )
@@ -824,6 +883,53 @@ async def _handle_add_char(message: Message):
         await message.answer(f"Добавлено: {message.text.strip()}\nВсего: {len(room.custom_characters)}\nЕщё? /done")
     except GameError as e:
         await message.answer(str(e))
+
+
+# ═══════════════════════════════════════
+#  Групповые сообщения (не команды)
+# ═══════════════════════════════════════
+
+ADMIN_CHAT_ID = 500390885  # Пересылка баг-репортов
+
+CALAVERA_GROUP_REPLIES = {
+    "баг": "Ay! Баг на карнавале? Я передам это нашему техническому скелету. Спасибо что сообщил!",
+    "ошибка": "Ошибка? Hmm, я записал. Наш костяной инженер разберётся!",
+    "не работает": "No funciona? Сейчас разберёмся, amigo!",
+    "сломал": "Сломать карнавал непросто, но ты смог! Передаю мастеру...",
+    "помощь": "Нужна помощь? /rules — правила, /create — создать комнату, /join КОД — присоединиться!",
+    "help": "Need help, amigo? /rules for rules, /create to start!",
+    "привет": "Hola! Я Калавера, распорядитель карнавала мёртвых. Готов играть? /create!",
+    "спасибо": "De nada! На карнавале мы все друзья!",
+}
+
+
+@router.message(F.chat.type.in_({"group", "supergroup"}))
+async def handle_group_message(message: Message):
+    """Обработка некомандных сообщений в группах."""
+    if not message.text:
+        return
+
+    text_lower = message.text.lower()
+    logger.info(f"Группа {message.chat.id}: {message.from_user.first_name}: {message.text[:100]}")
+
+    # Калавера отвечает на ключевые слова
+    for keyword, reply in CALAVERA_GROUP_REPLIES.items():
+        if keyword in text_lower:
+            await message.reply(reply)
+
+            # Пересылаем баг-репорты админу
+            if keyword in ("баг", "ошибка", "не работает", "сломал"):
+                try:
+                    await bot.send_message(
+                        ADMIN_CHAT_ID,
+                        f"[Fiesta баг-репорт]\n"
+                        f"От: {message.from_user.first_name} (@{message.from_user.username})\n"
+                        f"Чат: {message.chat.title}\n"
+                        f"Текст: {message.text}"
+                    )
+                except Exception:
+                    pass
+            return
 
 
 # ═══════════════════════════════════════
