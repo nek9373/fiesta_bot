@@ -150,7 +150,7 @@ class GameEngine:
             raise GameError("Ты уже в комнате")
         room.players[player.user_id] = player
         room.last_activity = time.time()
-        logger.info(f"{player.first_name} вошёл в комнату {room_id}")
+        logger.info(f"{player.first_name} ({player.user_id}) вошёл в комнату {room_id}")
         return room
 
     def leave_room(self, room_id: str, user_id: int) -> tuple[Room, bool]:
