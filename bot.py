@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from typing import Optional
 
 from aiogram import Bot, Dispatcher, F, Router
@@ -711,6 +712,7 @@ async def cb_start(cb: CallbackQuery):
         await safe_cb_answer(cb, str(e), show_alert=True)
         return
 
+    save_room_state(room)
     await safe_cb_answer(cb, "Игра началась!")
 
     if room.group_chat_id:
@@ -820,6 +822,10 @@ async def cb_guess(cb: CallbackQuery):
 
     cache["used_chars"].add(character)
     cache["current_idx"] += 1
+
+    room = engine.rooms.get(room_id)
+    if room:
+        save_room_state(room)
 
     await safe_cb_answer(cb, f"Выбрано: {character}")
 
@@ -932,6 +938,8 @@ async def _handle_word(message: Message):
     if not room:
         return
 
+    save_room_state(room)
+
     await update_group_status(room)
 
     if result["game_phase_changed"]:
@@ -1003,38 +1011,61 @@ async def handle_group_message(message: Message):
 #  Запуск
 # ═══════════════════════════════════════
 
-def _save_active_state():
-    """Сохранить активные комнаты в JSON для восстановления после рестарта."""
-    import json as _json
-    state = {
-        "player_rooms": dict(player_rooms),
-        "user_state": {str(k): v for k, v in user_state.items()},
-        "rooms": {},
-    }
-    for rid, room in engine.rooms.items():
-        if room.state in (GameState.LOBBY, GameState.FINISHED):
-            continue
-        state["rooms"][rid] = {
-            "state": room.state.value,
-            "players": {str(uid): p.first_name for uid, p in room.players.items()},
-            "current_tooth": room.current_tooth,
-        }
+def save_room_state(room):
+    """Сохранить комнату в БД. Вызывать после каждого изменения."""
     try:
-        with open("active_state.json", "w") as f:
-            _json.dump(state, f, ensure_ascii=False, indent=2)
+        store.save_room(room)
     except Exception as e:
-        logger.error(f"Ошибка сохранения state: {e}")
+        logger.error(f"Ошибка сохранения комнаты {room.room_id}: {e}")
+
+
+def _save_all_active():
+    """Сохранить все активные комнаты."""
+    for room in engine.rooms.values():
+        save_room_state(room)
+
+
+def _restore_rooms():
+    """Восстановить активные комнаты из БД после рестарта."""
+    rooms = store.load_active_rooms()
+    restored = 0
+    for room in rooms:
+        # Пропускаем слишком старые (>2 часов)
+        if time.time() - room.last_activity > 7200:
+            logger.info(f"Комната {room.room_id} слишком старая, пропускаем")
+            continue
+        engine.rooms[room.room_id] = room
+        for uid in room.players:
+            player_rooms[uid] = room.room_id
+            # Восстанавливаем user_state
+            if room.state == GameState.WRITING:
+                if uid not in room.tooth_submitted:
+                    user_state[uid] = "writing"
+            elif room.state == GameState.GUESSING:
+                if uid not in room.guessing_done:
+                    user_state[uid] = "guessing"
+        restored += 1
+    if restored:
+        logger.info(f"Восстановлено {restored} комнат из БД")
 
 
 async def main():
     logger.info("Fiesta Bot запускается...")
 
+    # Восстанавливаем комнаты из предыдущей сессии
+    _restore_rooms()
+
+    async def save_loop():
+        while True:
+            await asyncio.sleep(30)
+            _save_all_active()
+
     async def cleanup_loop():
         while True:
             await asyncio.sleep(600)
             engine.cleanup_stale_rooms()
-            _save_active_state()
 
+    asyncio.create_task(save_loop())
     asyncio.create_task(cleanup_loop())
     await dp.start_polling(bot, drop_pending_updates=True)
 

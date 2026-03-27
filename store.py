@@ -216,6 +216,112 @@ class FiestaStore:
         finally:
             conn.close()
 
+    def load_active_rooms(self) -> list[Room]:
+        """Загрузить незавершённые комнаты из БД для восстановления после рестарта."""
+        conn = self._conn()
+        try:
+            active_states = [s.value for s in GameState if s not in (GameState.FINISHED,)]
+            placeholders = ",".join("?" * len(active_states))
+            rows = conn.execute(
+                f"SELECT * FROM rooms WHERE state IN ({placeholders})",
+                active_states,
+            ).fetchall()
+
+            rooms = []
+            for row in rows:
+                settings_data = json.loads(row["settings_json"])
+                settings = RoomSettings(
+                    min_players=settings_data.get("min_players", 2),
+                    max_players=settings_data.get("max_players", 8),
+                    association_timeout=settings_data.get("association_timeout", 180),
+                    guessing_timeout=settings_data.get("guessing_timeout", 300),
+                    card_source=CardSource(settings_data.get("card_source", "default")),
+                    category=settings_data.get("category", "mixed"),
+                    difficulty_level=settings_data.get("difficulty_level", 0),
+                )
+
+                room = Room(
+                    room_id=row["room_id"],
+                    host_id=row["host_id"],
+                    group_chat_id=row["group_chat_id"],
+                    settings=settings,
+                    state=GameState(row["state"]),
+                    player_order=json.loads(row["player_order_json"]),
+                    custom_characters=json.loads(row["custom_characters_json"]),
+                    all_characters=json.loads(row["all_characters_json"]),
+                    decoy_characters=json.loads(row["decoy_characters_json"]),
+                    current_tooth=row["current_tooth"],
+                    bone_tokens=row["bone_tokens"],
+                    initial_bone_tokens=row["initial_bone_tokens"],
+                    created_at=row["created_at"],
+                    last_activity=row["last_activity"],
+                )
+
+                # Игроки
+                players_rows = conn.execute(
+                    "SELECT * FROM players WHERE room_id = ?",
+                    (room.room_id,),
+                ).fetchall()
+                for p in players_rows:
+                    room.players[p["user_id"]] = Player(
+                        user_id=p["user_id"],
+                        username=p["username"],
+                        first_name=p["first_name"],
+                        is_host=bool(p["is_host"]),
+                        joined_at=p["joined_at"],
+                        dm_available=bool(p["dm_available"]),
+                    )
+
+                # Черепа + шаги
+                skulls_rows = conn.execute(
+                    "SELECT * FROM skulls WHERE room_id = ?",
+                    (room.room_id,),
+                ).fetchall()
+                for sk in skulls_rows:
+                    skull = Skull(
+                        skull_id=sk["skull_id"],
+                        character=sk["character"],
+                        owner_id=sk["owner_id"],
+                        teeth_filled=sk["teeth_filled"],
+                    )
+                    steps_rows = conn.execute(
+                        "SELECT * FROM steps WHERE skull_id = ? ORDER BY step, written_at",
+                        (skull.skull_id,),
+                    ).fetchall()
+                    for st in steps_rows:
+                        skull.steps.append(AssociationStep(
+                            author_id=st["author_id"],
+                            word=st["word"],
+                            step=st["step"],
+                            written_at=st["written_at"],
+                        ))
+                    room.skulls[skull.skull_id] = skull
+
+                # Угадывания
+                guesses_rows = conn.execute(
+                    "SELECT * FROM guesses WHERE room_id = ?",
+                    (room.room_id,),
+                ).fetchall()
+                for g in guesses_rows:
+                    uid = g["user_id"]
+                    if uid not in room.guesses:
+                        room.guesses[uid] = {}
+                    room.guesses[uid][g["skull_id"]] = g["guessed_character"]
+
+                rooms.append(room)
+                logger.info(
+                    f"Восстановлена комната {room.room_id}: "
+                    f"state={room.state.value}, {room.num_players} игроков, "
+                    f"зуб {room.current_tooth}"
+                )
+
+            return rooms
+        except Exception as e:
+            logger.error(f"Ошибка загрузки комнат: {e}")
+            return []
+        finally:
+            conn.close()
+
     def delete_room(self, room_id: str):
         conn = self._conn()
         try:
