@@ -338,7 +338,7 @@ async def send_writing_tasks(room):
     async def gen_phrase(uid, task):
         player_name = room.players[uid].first_name
         if task["is_character"]:
-            return await cal('first_card', context=f'Игрок: {player_name}, персонаж: {task["visible"]}')
+            return await cal('first_card', context=f'Игрок: {player_name}')
         else:
             return await cal('new_tooth', context=f'Игрок: {player_name}, зуб {room.current_tooth + 1}')
 
