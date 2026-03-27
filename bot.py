@@ -606,7 +606,7 @@ async def _join_room(message: Message, room_id: str):
 
     player_rooms[user_id] = room.room_id
 
-    join_msg = f"{await cal('player_joined')} {player.first_name} ({room.num_players} игроков)"
+    join_msg = f"{await cal('player_joined', context=f'Игрок: {player.first_name}')} {player.first_name} ({room.num_players} игроков)"
 
     if room.group_chat_id:
         try:
