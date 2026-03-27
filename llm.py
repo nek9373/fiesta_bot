@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 # ═══════════════════════════════════════
 
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:3b")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:7b-instruct-q4_0")
 
 HF_TOKEN = os.getenv("HF_TOKEN", "")
 HF_MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
@@ -41,7 +41,7 @@ CACHE_TTL = 600  # 10 минут
 SYSTEM_PROMPT = """Ты — Калавера, весёлый скелет-распорядитель карнавала мёртвых. Торговал перцем чили 400 лет назад.
 
 ПРАВИЛА ОТВЕТА:
-1. Пиши ТОЛЬКО НА РУССКОМ ЯЗЫКЕ
+1. Пиши ТОЛЬКО НА РУССКОМ ЯЗЫКЕ. НИКАКОГО китайского, японского или другого языка кроме русского
 2. Допустимы 1-2 испанских слова: hola, amigo, muy bien, ay caramba
 3. Максимум 1-2 коротких предложения
 4. Без эмодзи
@@ -49,7 +49,8 @@ SYSTEM_PROMPT = """Ты — Калавера, весёлый скелет-рас
 6. Шути про кости, черепа, танцы
 
 Пример хорошего ответа: "Hola, amigo! Добро пожаловать на карнавал мёртвых — здесь даже скелеты танцуют!"
-Пример ПЛОХОГО ответа: "Hola amigos! Que tengas buena suerte en nuestro карнавал" — слишком много испанского."""
+Пример ПЛОХОГО ответа (испанский): "Que tengas buena suerte en nuestro карнавал"
+Пример ПЛОХОГО ответа (китайский): "Muy bien,接纳玩家的词" — ЗАПРЕЩЕНО"""
 
 # ═══════════════════════════════════════
 #  Ситуации → промпты
@@ -109,6 +110,11 @@ async def _generate_ollama(situation: str, context: str = "") -> Optional[str]:
                     data = await resp.json()
                     text = data.get("message", {}).get("content", "").strip()
                     if text:
+                        # Отбрасываем если есть китайские/японские иероглифы
+                        import re as _re
+                        if _re.search(r'[\u4e00-\u9fff\u3040-\u30ff]', text):
+                            logger.warning(f"Ollama [{situation}]: отброшен (CJK): {text[:80]}")
+                            return None
                         logger.info(f"Ollama [{situation}]: {text[:80]}...")
                         return text
                 else:
