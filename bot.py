@@ -323,22 +323,37 @@ async def send_writing_tasks(room):
     room.status_message_id = None
     await update_group_status(room)
 
+    # Собираем задачи и генерим LLM-фразы параллельно
+    tasks_data = []
     for uid in room.players:
         task = engine.get_current_task(room, uid)
         if not task:
             continue
+        tasks_data.append((uid, task))
 
+    if not tasks_data:
+        return
+
+    # Параллельная генерация фраз для всех игроков
+    async def gen_phrase(uid, task):
         player_name = room.players[uid].first_name
         if task["is_character"]:
+            return await cal('first_card', context=f'Игрок: {player_name}, персонаж: {task["visible"]}')
+        else:
+            return await cal('new_tooth', context=f'Игрок: {player_name}, зуб {room.current_tooth + 1}')
+
+    phrases = await asyncio.gather(*[gen_phrase(uid, task) for uid, task in tasks_data])
+
+    # Рассылка (быстрая, без LLM)
+    for (uid, task), cal_phrase in zip(tasks_data, phrases):
+        if task["is_character"]:
             char_name = task['visible']
-            cal_phrase = await cal('first_card', context=f'Игрок: {player_name}, персонаж: {char_name}')
             text = (
                 f"{cal_phrase}\n\n"
                 f"Твой персонаж: {char_name}\n\n"
                 f"Напиши ОДНО слово:"
             )
         else:
-            cal_phrase = await cal('new_tooth', context=f'Игрок: {player_name}, зуб {room.current_tooth + 1}')
             text = (
                 f"{cal_phrase}\n\n"
                 f"Зуб {room.current_tooth + 1}/{TOTAL_TEETH}\n\n"
