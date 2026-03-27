@@ -328,15 +328,19 @@ async def send_writing_tasks(room):
         if not task:
             continue
 
+        player_name = room.players[uid].first_name
         if task["is_character"]:
+            char_name = task['visible']
+            cal_phrase = await cal('first_card', context=f'Игрок: {player_name}, персонаж: {char_name}')
             text = (
-                f"{await cal('first_card')}\n\n"
-                f"Твой персонаж: {task['visible']}\n\n"
+                f"{cal_phrase}\n\n"
+                f"Твой персонаж: {char_name}\n\n"
                 f"Напиши ОДНО слово:"
             )
         else:
+            cal_phrase = await cal('new_tooth', context=f'Игрок: {player_name}, зуб {room.current_tooth + 1}')
             text = (
-                f"{await cal('new_tooth')}\n\n"
+                f"{cal_phrase}\n\n"
                 f"Зуб {room.current_tooth + 1}/{TOTAL_TEETH}\n\n"
                 f"На черепе написано:\n\n"
                 f"\"{task['visible']}\"\n\n"
