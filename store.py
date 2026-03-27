@@ -106,6 +106,12 @@ class FiestaStore:
         CREATE INDEX IF NOT EXISTS idx_steps_skull ON steps(skull_id);
         CREATE INDEX IF NOT EXISTS idx_results_user ON game_results(user_id);
         """)
+        # Миграция: добавить total_teeth если ещё нет
+        try:
+            conn.execute("ALTER TABLE rooms ADD COLUMN total_teeth INTEGER NOT NULL DEFAULT 4")
+            logger.info("Миграция: добавлена колонка total_teeth в rooms")
+        except sqlite3.OperationalError:
+            pass  # колонка уже существует
         conn.commit()
         conn.close()
         logger.info(f"БД инициализирована: {self.db_path}")
@@ -127,9 +133,9 @@ class FiestaStore:
                 INSERT OR REPLACE INTO rooms
                 (room_id, host_id, group_chat_id, state, settings_json,
                  player_order_json, custom_characters_json, all_characters_json,
-                 decoy_characters_json, current_tooth, bone_tokens,
+                 decoy_characters_json, current_tooth, total_teeth, bone_tokens,
                  initial_bone_tokens, created_at, last_activity)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 room.room_id, room.host_id, room.group_chat_id,
                 room.state.value, json.dumps(settings),
@@ -137,7 +143,7 @@ class FiestaStore:
                 json.dumps(room.custom_characters),
                 json.dumps(room.all_characters),
                 json.dumps(room.decoy_characters),
-                room.current_tooth, room.bone_tokens,
+                room.current_tooth, room.total_teeth, room.bone_tokens,
                 room.initial_bone_tokens,
                 room.created_at, room.last_activity,
             ))
@@ -250,6 +256,7 @@ class FiestaStore:
                     custom_characters=json.loads(row["custom_characters_json"]),
                     all_characters=json.loads(row["all_characters_json"]),
                     decoy_characters=json.loads(row["decoy_characters_json"]),
+                    total_teeth=row["total_teeth"] if "total_teeth" in row.keys() else 4,
                     current_tooth=row["current_tooth"],
                     bone_tokens=row["bone_tokens"],
                     initial_bone_tokens=row["initial_bone_tokens"],

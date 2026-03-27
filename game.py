@@ -11,7 +11,7 @@ import time
 from typing import Optional
 
 from models import (
-    TOTAL_CHARACTERS, TOTAL_TEETH,
+    TOTAL_CHARACTERS, MAX_TEETH,
     AssociationStep, CardSource, ConstraintType, GameState,
     Player, Room, RoomSettings, Skull,
 )
@@ -219,6 +219,10 @@ class GameEngine:
         room.player_order = list(room.players.keys())
         random.shuffle(room.player_order)
 
+        # Число зубов = число игроков (каждый подержит каждый череп), но не более MAX_TEETH
+        room.total_teeth = min(room.num_players, MAX_TEETH)
+        logger.info(f"Комната {room_id}: total_teeth={room.total_teeth} (игроков={room.num_players}, макс={MAX_TEETH})")
+
         # Получаем персонажей: N для игроков + (8-N) обманок
         source = room.settings.card_source.value
         custom = room.custom_characters or None
@@ -355,13 +359,13 @@ class GameEngine:
             room.current_tooth += 1
             room.tooth_submitted.clear()
 
-            if room.current_tooth >= TOTAL_TEETH:
+            if room.current_tooth >= room.total_teeth:
                 room.state = GameState.GUESSING
                 room.guesses.clear()
                 room.guessing_done.clear()
                 room.guessing_progress.clear()
                 game_phase_changed = True
-                logger.info(f"Комната {room_id}: все 4 зуба заполнены, переход к угадыванию")
+                logger.info(f"Комната {room_id}: все {room.total_teeth} зубов заполнены, переход к угадыванию")
 
         return {
             "tooth_complete": tooth_complete,

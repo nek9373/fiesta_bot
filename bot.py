@@ -18,7 +18,7 @@ from aiogram.types import (
 )
 
 from game import GameEngine, GameError
-from models import CardSource, GameState, Player, RoomSettings, TOTAL_TEETH
+from models import CardSource, GameState, Player, RoomSettings
 from store import FiestaStore
 
 _log_fmt = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
@@ -190,7 +190,7 @@ async def update_group_status(room):
         if room.current_tooth < len(room.active_constraints):
             constraint_text = f"\nОграничение: {room.active_constraints[room.current_tooth].value}"
         text = (
-            f"Зуб {room.current_tooth + 1}/{TOTAL_TEETH}{constraint_text}\n"
+            f"Зуб {room.current_tooth + 1}/{room.total_teeth}{constraint_text}\n"
             f"Ждём: {', '.join(pending) if pending else 'все готовы!'}"
         )
     elif room.state == GameState.GUESSING:
@@ -290,7 +290,7 @@ async def tooth_timeout(room_id: str, tooth: int, timeout: int):
 
     room.current_tooth += 1
     room.tooth_submitted.clear()
-    if room.current_tooth >= TOTAL_TEETH:
+    if room.current_tooth >= room.total_teeth:
         room.state = GameState.GUESSING
         room.guesses.clear()
         room.guessing_done.clear()
@@ -357,7 +357,7 @@ async def send_writing_tasks(room):
         else:
             text = (
                 f"{cal_phrase}\n\n"
-                f"Зуб {room.current_tooth + 1}/{TOTAL_TEETH}\n\n"
+                f"Зуб {room.current_tooth + 1}/{room.total_teeth}\n\n"
                 f"На черепе написано:\n\n"
                 f"\"{task['visible']}\"\n\n"
                 f"Стираешь это слово. Пиши ОДНО слово-ассоциацию:"
@@ -534,7 +534,7 @@ async def cmd_rules(message: Message):
         "2. Пишешь ОДНО слово-ассоциацию с персонажем\n"
         "3. Передаёшь череп соседу — он видит только твоё слово\n"
         "4. Он стирает и пишет своё слово (ассоциацию на твоё)\n"
-        "5. Так 4 круга\n"
+        "5. Так несколько кругов (зависит от числа игроков)\n"
         "6. В конце видны только последние слова + 8 персонажей\n"
         "7. Все вместе сопоставляют слова с персонажами\n\n"
         "Цель — упокоить как можно больше мёртвых!\n"
@@ -729,7 +729,7 @@ async def cb_start(cb: CallbackQuery):
             await bot.send_message(
                 room.group_chat_id,
                 f"{await cal('game_start')}\n\n"
-                f"Игроков: {room.num_players}{constraint_text}\n"
+                f"Игроков: {room.num_players}, зубов: {room.total_teeth}{constraint_text}\n"
                 f"Жетоны кости: {room.initial_bone_tokens}\n"
                 f"Проверяйте личные сообщения!"
             )

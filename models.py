@@ -6,8 +6,8 @@
 2. Каждый берёт карточку персонажа, пишет имя на "черепе"
 3. Пишет ОДНО слово-ассоциацию, закрашивает зуб, передаёт ВЛЕВО
 4. Следующий СТИРАЕТ слово, пишет своё (ассоциация на прочитанное)
-5. Ровно 4 круга (4 зуба)
-6. После 4 кругов — черепа в центр, добавляют персонажей из колоды до 8
+5. Число кругов = число игроков (макс 6)
+6. После всех кругов — черепа в центр, добавляют персонажей из колоды до 8
 7. Каждый молча сопоставляет последние слова с персонажами
 8. Подсчёт: для каждого черепа считают правильные ответы ВСЕХ игроков.
    Порог = N-1. Если все N угадали — бонусный жетон кости.
@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
 
-TOTAL_TEETH = 4           # Фиксированное число кругов ассоциаций
+MAX_TEETH = 6             # Хард-лимит сверху на число кругов
 TOTAL_CHARACTERS = 8      # Всегда 8 персонажей на столе при угадывании
 MIN_PLAYERS = 2
 MAX_PLAYERS = 8
@@ -74,7 +74,7 @@ class AssociationStep:
     """Один шаг ассоциации на черепе."""
     author_id: int
     word: str                    # Одно слово
-    step: int                    # 0..3 (номер зуба)
+    step: int                    # 0..total_teeth-1 (номер зуба)
     written_at: float = field(default_factory=time.time)
 
 
@@ -85,7 +85,7 @@ class Skull:
     character: str = ""          # Имя персонажа (написано внутри)
     owner_id: int = 0            # Кто изначально получил
     steps: list[AssociationStep] = field(default_factory=list)
-    teeth_filled: int = 0        # Сколько зубов закрашено (0..4)
+    teeth_filled: int = 0        # Сколько зубов закрашено (0..total_teeth)
 
     @property
     def last_word(self) -> Optional[str]:
@@ -129,7 +129,9 @@ class Room:
     decoy_characters: list[str] = field(default_factory=list)
     # Все 8 персонажей для угадывания (перемешаны)
     all_characters: list[str] = field(default_factory=list)
-    # Текущий зуб (0..3)
+    # Число зубов (раундов ассоциаций), вычисляется при старте = min(num_players, MAX_TEETH)
+    total_teeth: int = 4
+    # Текущий зуб (0..total_teeth-1)
     current_tooth: int = 0
     # Кто уже написал слово на текущем зубе
     tooth_submitted: set[int] = field(default_factory=set)
