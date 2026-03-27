@@ -25,7 +25,7 @@ from typing import Optional
 
 TOTAL_TEETH = 4           # Фиксированное число кругов ассоциаций
 TOTAL_CHARACTERS = 8      # Всегда 8 персонажей на столе при угадывании
-MIN_PLAYERS = 4
+MIN_PLAYERS = 2
 MAX_PLAYERS = 8
 
 

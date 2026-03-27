@@ -20,14 +20,12 @@ from game import GameEngine, GameError
 from models import CardSource, GameState, Player, RoomSettings, TOTAL_TEETH
 from store import FiestaStore
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("fiesta.log", encoding="utf-8"),
-    ],
-)
+_log_fmt = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+logging.basicConfig(level=logging.INFO, format=_log_fmt)
+# Файловый хендлер — один раз, без дублирования
+_fh = logging.FileHandler("fiesta.log", encoding="utf-8")
+_fh.setFormatter(logging.Formatter(_log_fmt))
+logging.getLogger().addHandler(_fh)
 logger = logging.getLogger(__name__)
 
 TOKEN = os.getenv("FIESTA_BOT_TOKEN", "8265764394:AAHji-WSZ7wmq92TOFv1FD2vRXobMMksv9c")
@@ -168,6 +166,14 @@ async def send_dm(user_id: int, text: str, reply_markup=None):
         await bot.send_message(user_id, text, reply_markup=reply_markup)
     except Exception as e:
         logger.error(f"Не удалось ЛС {user_id}: {e}")
+
+
+async def safe_cb_answer(cb: CallbackQuery, text: str = "", **kwargs):
+    """cb.answer() который не падает на 'query is too old'."""
+    try:
+        await cb.answer(text, **kwargs)
+    except Exception as e:
+        logger.debug(f"cb.answer failed (expected): {e}")
 
 
 async def update_group_status(room):
@@ -469,11 +475,10 @@ async def show_results(room):
         except Exception:
             pass
 
-    # Очистка
-    for uid in list(player_rooms.keys()):
-        if player_rooms.get(uid) == room.room_id:
-            del player_rooms[uid]
-    guessing_cache.clear()
+    # Очистка — только игроков этой комнаты
+    for uid in list(room.players.keys()):
+        player_rooms.pop(uid, None)
+        guessing_cache.pop(uid, None)
 
 
 # ═══════════════════════════════════════
@@ -651,7 +656,7 @@ async def cb_join(cb: CallbackQuery):
     user_id = cb.from_user.id
 
     if user_id in player_rooms:
-        await cb.answer("Ты уже в комнате!" if player_rooms[user_id] == room_id
+        await safe_cb_answer(cb, "Ты уже в комнате!" if player_rooms[user_id] == room_id
                         else "Ты в другой комнате")
         return
 
@@ -662,11 +667,11 @@ async def cb_join(cb: CallbackQuery):
     try:
         room = engine.join_room(room_id, player)
     except GameError as e:
-        await cb.answer(str(e), show_alert=True)
+        await safe_cb_answer(cb, str(e), show_alert=True)
         return
 
     player_rooms[user_id] = room.room_id
-    await cb.answer(f"Ты в комнате!")
+    await safe_cb_answer(cb, "Ты в комнате!")
 
     if not dm_ok:
         bot_info = await bot.get_me()
@@ -684,10 +689,10 @@ async def cb_start(cb: CallbackQuery):
     try:
         room = engine.start_game(room_id, cb.from_user.id)
     except GameError as e:
-        await cb.answer(str(e), show_alert=True)
+        await safe_cb_answer(cb, str(e), show_alert=True)
         return
 
-    await cb.answer("Игра началась!")
+    await safe_cb_answer(cb, "Игра началась!")
 
     if room.group_chat_id:
         room.status_message_id = None
@@ -715,11 +720,11 @@ async def cb_collect(cb: CallbackQuery):
     try:
         room = engine.start_collecting(room_id, cb.from_user.id)
     except GameError as e:
-        await cb.answer(str(e), show_alert=True)
+        await safe_cb_answer(cb, str(e), show_alert=True)
         return
 
     room.settings.card_source = CardSource.MIXED
-    await cb.answer("Режим сбора!")
+    await safe_cb_answer(cb, "Режим сбора!")
 
     for uid in room.players:
         user_state[uid] = "adding_character"
@@ -735,11 +740,11 @@ async def cb_category(cb: CallbackQuery):
     room_id, category = parts[1], parts[2]
     room = engine.rooms.get(room_id)
     if not room or cb.from_user.id != room.host_id:
-        await cb.answer("Только хост")
+        await safe_cb_answer(cb, "Только хост")
         return
     room.settings.category = category
     names = {"books": "Книги", "movies": "Фильмы", "series": "Сериалы", "mixed": "Всё"}
-    await cb.answer(f"Категория: {names.get(category, category)}")
+    await safe_cb_answer(cb, f"Категория: {names.get(category, category)}")
 
 
 @router.callback_query(F.data.startswith("lvl:"))
@@ -748,10 +753,10 @@ async def cb_level(cb: CallbackQuery):
     room_id, level = parts[1], int(parts[2])
     room = engine.rooms.get(room_id)
     if not room or cb.from_user.id != room.host_id:
-        await cb.answer("Только хост")
+        await safe_cb_answer(cb, "Только хост")
         return
     room.settings.difficulty_level = level
-    await cb.answer(f"Уровень сложности: {level}")
+    await safe_cb_answer(cb, f"Уровень сложности: {level}")
 
 
 @router.callback_query(F.data.startswith("leave:"))
@@ -761,11 +766,11 @@ async def cb_leave(cb: CallbackQuery):
     try:
         room, destroyed = engine.leave_room(room_id, user_id)
     except GameError as e:
-        await cb.answer(str(e), show_alert=True)
+        await safe_cb_answer(cb, str(e), show_alert=True)
         return
     player_rooms.pop(user_id, None)
     user_state.pop(user_id, None)
-    await cb.answer("Ты вышел")
+    await safe_cb_answer(cb, "Ты вышел")
     if not destroyed:
         await update_group_status(room)
 
@@ -775,7 +780,7 @@ async def cb_guess(cb: CallbackQuery):
     """g:ROOM:SKULL_ID:char_idx"""
     parts = cb.data.split(":")
     if len(parts) != 4:
-        await cb.answer("Ошибка")
+        await safe_cb_answer(cb, "Ошибка")
         return
 
     room_id, skull_id, char_idx = parts[1], parts[2], int(parts[3])
@@ -783,7 +788,7 @@ async def cb_guess(cb: CallbackQuery):
 
     cache = guessing_cache.get(user_id)
     if not cache:
-        await cb.answer("Нет данных")
+        await safe_cb_answer(cb, "Нет данных")
         return
 
     character = cache["characters"][char_idx]
@@ -791,13 +796,13 @@ async def cb_guess(cb: CallbackQuery):
     try:
         result = engine.submit_guess(room_id, user_id, skull_id, character)
     except GameError as e:
-        await cb.answer(str(e), show_alert=True)
+        await safe_cb_answer(cb, str(e), show_alert=True)
         return
 
     cache["used_chars"].add(character)
     cache["current_idx"] += 1
 
-    await cb.answer(f"Выбрано: {character}")
+    await safe_cb_answer(cb, f"Выбрано: {character}")
 
     try:
         await cb.message.delete()
@@ -824,7 +829,7 @@ async def cb_restart(cb: CallbackQuery):
     room_id = cb.data.split(":")[1]
     room = engine.rooms.get(room_id)
     if not room:
-        await cb.answer("Комната закрыта. /create")
+        await safe_cb_answer(cb, "Комната закрыта. /create")
         return
 
     room.state = GameState.LOBBY
@@ -845,7 +850,7 @@ async def cb_restart(cb: CallbackQuery):
     for uid in room.players:
         player_rooms[uid] = room.room_id
 
-    await cb.answer("Новый раунд!")
+    await safe_cb_answer(cb, "Новый раунд!")
     await update_group_status(room)
     await send_dm(room.host_id, f"Комната {room.room_id} готова!",
                   reply_markup=lobby_kb(room.room_id, True))
@@ -979,6 +984,29 @@ async def handle_group_message(message: Message):
 #  Запуск
 # ═══════════════════════════════════════
 
+def _save_active_state():
+    """Сохранить активные комнаты в JSON для восстановления после рестарта."""
+    import json as _json
+    state = {
+        "player_rooms": dict(player_rooms),
+        "user_state": {str(k): v for k, v in user_state.items()},
+        "rooms": {},
+    }
+    for rid, room in engine.rooms.items():
+        if room.state in (GameState.LOBBY, GameState.FINISHED):
+            continue
+        state["rooms"][rid] = {
+            "state": room.state.value,
+            "players": {str(uid): p.first_name for uid, p in room.players.items()},
+            "current_tooth": room.current_tooth,
+        }
+    try:
+        with open("active_state.json", "w") as f:
+            _json.dump(state, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"Ошибка сохранения state: {e}")
+
+
 async def main():
     logger.info("Fiesta Bot запускается...")
 
@@ -986,9 +1014,10 @@ async def main():
         while True:
             await asyncio.sleep(600)
             engine.cleanup_stale_rooms()
+            _save_active_state()
 
     asyncio.create_task(cleanup_loop())
-    await dp.start_polling(bot)
+    await dp.start_polling(bot, drop_pending_updates=True)
 
 
 if __name__ == "__main__":
