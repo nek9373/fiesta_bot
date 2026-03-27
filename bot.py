@@ -651,6 +651,25 @@ async def cmd_stats(message: Message):
     )
 
 
+@router.message(Command("feedback"))
+async def cmd_feedback(message: Message):
+    text = message.text.replace("/feedback", "", 1).strip()
+    if not text:
+        await message.answer("Напиши: /feedback твоё сообщение")
+        return
+    user = message.from_user
+    try:
+        await bot.send_message(
+            ADMIN_CHAT_ID,
+            f"[Fiesta feedback]\n"
+            f"От: {user.first_name} (@{user.username}, id={user.id})\n"
+            f"Текст: {text}"
+        )
+    except Exception as e:
+        logger.error(f"Ошибка пересылки фидбека: {e}")
+    await message.answer("Передано! Спасибо за обратную связь.")
+
+
 @router.message(Command("leave"))
 async def cmd_leave(message: Message):
     user_id = message.from_user.id
