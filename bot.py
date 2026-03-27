@@ -486,14 +486,18 @@ async def show_results(room):
         )
 
     # Кнопка "ещё раз"
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="Ещё раз!", callback_data=f"restart:{room.room_id}")
+    ]])
+    farewell_text = await cal("farewell")
     if room.group_chat_id:
-        kb = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="Ещё раз!", callback_data=f"restart:{room.room_id}")
-        ]])
         try:
-            await bot.send_message(room.group_chat_id, await cal("farewell"), reply_markup=kb)
+            await bot.send_message(room.group_chat_id, farewell_text, reply_markup=kb)
         except Exception:
             pass
+    # В ЛС хосту (на случай если нет группового чата)
+    if not room.group_chat_id:
+        await send_dm(room.host_id, farewell_text, reply_markup=kb)
 
     # Очистка — только игроков этой комнаты
     for uid in list(room.players.keys()):
