@@ -116,7 +116,7 @@ CALAVERA_PHRASES = {
 
 import random as _rnd
 
-from llm import calavera_llm
+from llm import calavera_llm, unload_ollama_model, is_model_loaded
 
 
 def calavera(key: str) -> str:
@@ -1088,8 +1088,32 @@ async def main():
             await asyncio.sleep(600)
             engine.cleanup_stale_rooms()
 
+    async def ollama_unload_loop():
+        """Выгружает модель из памяти если нет активных игр 30 минут."""
+        IDLE_TIMEOUT = 30 * 60  # 30 минут
+        while True:
+            await asyncio.sleep(300)  # проверяем каждые 5 минут
+            if not is_model_loaded():
+                continue
+            # Есть ли активные игры?
+            active = any(
+                r.state not in (GameState.LOBBY, GameState.FINISHED)
+                for r in engine.rooms.values()
+            )
+            if active:
+                continue
+            # Когда последняя игра завершилась?
+            last_activity = max(
+                (r.last_activity for r in engine.rooms.values()),
+                default=0,
+            )
+            if last_activity and time.time() - last_activity >= IDLE_TIMEOUT:
+                logger.info("Нет активных игр 30 мин — выгружаю модель ollama")
+                await unload_ollama_model()
+
     asyncio.create_task(save_loop())
     asyncio.create_task(cleanup_loop())
+    asyncio.create_task(ollama_unload_loop())
     await dp.start_polling(bot, drop_pending_updates=True)
 
 

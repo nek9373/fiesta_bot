@@ -220,6 +220,8 @@ async def calavera_llm(situation: str, context: str = "",
 
     # Пробуем ollama
     text = await _generate_ollama(situation, context)
+    if text:
+        mark_model_used()
 
     # Фоллбэк на HF
     if not text:
@@ -269,3 +271,51 @@ async def check_llm_status() -> dict:
         status["hf"] = True  # Токен есть, считаем доступным
 
     return status
+
+
+# ═══════════════════════════════════════
+#  Выгрузка модели из памяти
+# ═══════════════════════════════════════
+
+_model_loaded = False  # Отслеживаем, загружена ли модель
+
+
+def mark_model_used():
+    """Пометить что модель используется (вызывается при генерации)."""
+    global _model_loaded
+    _model_loaded = True
+
+
+def is_model_loaded() -> bool:
+    """Загружена ли модель (по нашим данным)."""
+    return _model_loaded
+
+
+async def unload_ollama_model() -> bool:
+    """
+    Выгрузить модель из памяти ollama.
+    Отправляет запрос с keep_alive=0 чтобы ollama освободил RAM/VRAM.
+    Возвращает True если успешно.
+    """
+    global _model_loaded
+    payload = {
+        "model": OLLAMA_MODEL,
+        "keep_alive": 0,
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{OLLAMA_URL}/api/generate",
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status == 200:
+                    _model_loaded = False
+                    logger.info(f"Модель {OLLAMA_MODEL} выгружена из памяти")
+                    return True
+                else:
+                    body = await resp.text()
+                    logger.warning(f"Не удалось выгрузить модель: {resp.status} {body[:200]}")
+    except Exception as e:
+        logger.warning(f"Ошибка при выгрузке модели: {e}")
+    return False
