@@ -116,7 +116,7 @@ CALAVERA_PHRASES = {
 
 import random as _rnd
 
-from llm import calavera_llm, unload_ollama_model, is_model_loaded
+from llm import calavera_llm, calavera_suggest, unload_ollama_model, is_model_loaded
 
 
 def calavera(key: str) -> str:
@@ -367,7 +367,18 @@ async def send_writing_tasks(room):
             text += f"\n\nОграничение: {task['constraint'].value}"
 
         user_state[uid] = "writing"
-        await send_dm(uid, text)
+
+        # Кнопка "Спросить Калаверу" — только на зубах > 0 (не на первом)
+        if not task["is_character"]:
+            kb = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="Спросить Калаверу",
+                    callback_data=f"suggest:{room.room_id}:{uid}",
+                )
+            ]])
+            await send_dm(uid, text, reply_markup=kb)
+        else:
+            await send_dm(uid, text)
 
     start_timer(
         room.room_id, f"tooth_{room.current_tooth}",
@@ -870,6 +881,55 @@ async def cb_guess(cb: CallbackQuery):
         room = engine.rooms.get(room_id)
         if room:
             await update_group_status(room)
+
+
+@router.callback_query(F.data.startswith("suggest:"))
+async def cb_suggest(cb: CallbackQuery):
+    """Игрок нажал 'Спросить Калаверу' — генерируем подсказку."""
+    parts = cb.data.split(":")
+    room_id, target_uid = parts[1], int(parts[2])
+    user_id = cb.from_user.id
+
+    if user_id != target_uid:
+        await safe_cb_answer(cb, "Это не твоя кнопка!")
+        return
+
+    room = engine.rooms.get(room_id)
+    if not room or room.state != GameState.WRITING:
+        await safe_cb_answer(cb, "Уже не актуально")
+        return
+
+    if user_id in room.tooth_submitted:
+        await safe_cb_answer(cb, "Ты уже написал слово")
+        return
+
+    task = engine.get_current_task(room, user_id)
+    if not task:
+        await safe_cb_answer(cb, "Нет задания")
+        return
+
+    await safe_cb_answer(cb, "Калавера думает...")
+
+    # Убираем кнопку чтобы не жали повторно
+    try:
+        await cb.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    constraint_text = task["constraint"].value if task.get("constraint") else ""
+    result = await calavera_suggest(task["visible"], constraint=constraint_text)
+
+    if "error" in result:
+        text = f"{result['error']}\n\nПиши своё слово:"
+    else:
+        text = (
+            f"Калавера предлагает: \"{result['word']}\"\n\n"
+            f"\"{result['reason']}\"\n\n"
+            f"Можешь использовать это слово или написать своё:"
+        )
+
+    await send_dm(user_id, text)
+    logger.info(f"Suggest для {user_id} в {room_id}: {result}")
 
 
 @router.callback_query(F.data.startswith("restart:"))

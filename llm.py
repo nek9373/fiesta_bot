@@ -274,6 +274,107 @@ async def check_llm_status() -> dict:
 
 
 # ═══════════════════════════════════════
+#  Подсказка Калаверы (ассоциация)
+# ═══════════════════════════════════════
+
+SUGGEST_SYSTEM = """Ты — Калавера, старый скелет-распорядитель карнавала мёртвых. Тебя просят помочь с ассоциацией в игре.
+
+Правила игры: игроки передают друг другу слова-ассоциации. На каждом шаге ты видишь слово и должен написать ОДНО новое слово, связанное с ним. Цель — чтобы по цепочке ассоциаций можно было угадать исходного персонажа.
+
+СТРОГИЕ ПРАВИЛА:
+1. ТОЛЬКО РУССКИЙ. Никакого китайского.
+2. Ответ СТРОГО в формате:
+   Слово: <одно слово>
+   Почему: <1 предложение от лица Калаверы, почему эти слова связаны>
+3. Слово должно быть ОДНИМ словом (без пробелов), существительным или прилагательным
+4. НЕ повторяй исходное слово и его однокоренные
+5. Выбирай яркую, запоминающуюся ассоциацию"""
+
+SUGGEST_FALLBACKS = [
+    "Мои старые кости молчат, amigo. Придумай сам!",
+    "Четыреста лет опыта, а подсказать не могу. Карнавал — дело личное!",
+    "Ay, мой череп пуст сегодня. Доверься своей интуиции!",
+]
+
+
+async def calavera_suggest(word: str, constraint: str = "") -> dict:
+    """
+    Генерирует подсказку-ассоциацию от Калаверы.
+
+    Returns:
+        {"word": "...", "reason": "..."} или {"error": "..."}
+    """
+    prompt = f'Слово на черепе: "{word}". Придумай ассоциацию.'
+    if constraint:
+        prompt += f"\nОграничение: {constraint}"
+
+    payload = {
+        "model": OLLAMA_MODEL,
+        "messages": [
+            {"role": "system", "content": SUGGEST_SYSTEM},
+            {"role": "user", "content": prompt},
+        ],
+        "stream": False,
+        "options": {
+            "temperature": 0.9,
+            "top_p": 0.9,
+            "num_predict": 80,
+        },
+    }
+
+    text = None
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{OLLAMA_URL}/api/chat",
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=LLM_TIMEOUT),
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    text = data.get("message", {}).get("content", "").strip()
+                    mark_model_used()
+    except Exception as e:
+        logger.warning(f"Ollama suggest error: {e}")
+
+    if not text:
+        return {"error": random.choice(SUGGEST_FALLBACKS)}
+
+    # Парсим ответ
+    import re as _re
+    # Отбрасываем CJK
+    if _re.search(r'[\u4e00-\u9fff\u3040-\u30ff]', text):
+        logger.warning(f"Suggest отброшен (CJK): {text[:80]}")
+        return {"error": random.choice(SUGGEST_FALLBACKS)}
+
+    word_match = _re.search(r'[Сс]лово:\s*(.+)', text)
+    reason_match = _re.search(r'[Пп]очему:\s*(.+)', text)
+
+    suggested = word_match.group(1).strip().strip('"«»') if word_match else None
+    reason = reason_match.group(1).strip() if reason_match else None
+
+    if not suggested:
+        # Попробуем взять первое слово из ответа
+        first_line = text.split('\n')[0].strip()
+        if len(first_line.split()) <= 3:
+            suggested = first_line.split()[0] if first_line else None
+
+    if not suggested:
+        logger.warning(f"Не удалось распарсить подсказку: {text[:120]}")
+        return {"error": random.choice(SUGGEST_FALLBACKS)}
+
+    # Чистим слово
+    suggested = suggested.split()[0]  # только первое слово
+    suggested = _re.sub(r'[^а-яА-ЯёЁa-zA-Z-]', '', suggested)
+
+    if not suggested or len(suggested) < 2:
+        return {"error": random.choice(SUGGEST_FALLBACKS)}
+
+    logger.info(f"Suggest: '{word}' -> '{suggested}' ({reason})")
+    return {"word": suggested, "reason": reason or "Калавера знает что делает."}
+
+
+# ═══════════════════════════════════════
 #  Выгрузка модели из памяти
 # ═══════════════════════════════════════
 
