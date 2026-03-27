@@ -277,6 +277,20 @@ class GameEngine:
 
     # ─── Этап ассоциаций ───
 
+    def _get_player_constraint(self, room: Room, user_id: int) -> ConstraintType | None:
+        """Получить ограничение для конкретного игрока на текущем зубе.
+        Каждый игрок получает своё ограничение из пула (детерминистично)."""
+        if not room.active_constraints:
+            return None
+        pool = room.active_constraints
+        try:
+            player_idx = room.player_order.index(user_id)
+        except ValueError:
+            player_idx = 0
+        # Разные ограничения для разных игроков на одном зубе
+        idx = (room.current_tooth * 7 + player_idx) % len(pool)
+        return pool[idx]
+
     def get_current_task(self, room: Room, user_id: int) -> dict | None:
         """Что должен сделать игрок на текущем зубе."""
         if room.state != GameState.WRITING:
@@ -290,10 +304,8 @@ class GameEngine:
 
         is_first_tooth = room.current_tooth == 0
 
-        # Ограничение для этого зуба
-        constraint = None
-        if room.current_tooth < len(room.active_constraints):
-            constraint = room.active_constraints[room.current_tooth]
+        # Ограничение — у каждого игрока своё (из пула, по индексу)
+        constraint = self._get_player_constraint(room, user_id)
 
         return {
             "skull_id": skull.skull_id,
@@ -326,10 +338,8 @@ class GameEngine:
         previous = skull.last_word
         character = skull.character
 
-        # Ограничение
-        constraint = None
-        if room.current_tooth < len(room.active_constraints):
-            constraint = room.active_constraints[room.current_tooth]
+        # Ограничение — у каждого игрока своё
+        constraint = self._get_player_constraint(room, user_id)
 
         # Валидация
         err = validate_word(word, previous_word=previous,

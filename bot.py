@@ -187,8 +187,8 @@ async def update_group_status(room):
             for uid in room.players if uid not in room.tooth_submitted
         ]
         constraint_text = ""
-        if room.current_tooth < len(room.active_constraints):
-            constraint_text = f"\nОграничение: {room.active_constraints[room.current_tooth].value}"
+        if room.active_constraints:
+            constraint_text = "\nОграничения: у каждого своё!"
         text = (
             f"Зуб {room.current_tooth + 1}/{room.total_teeth}{constraint_text}\n"
             f"Ждём: {', '.join(pending) if pending else 'все готовы!'}"
