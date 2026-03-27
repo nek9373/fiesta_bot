@@ -106,7 +106,7 @@ class Skull:
 class RoomSettings:
     min_players: int = MIN_PLAYERS
     max_players: int = MAX_PLAYERS
-    association_timeout: int = 90     # Сек на одно слово
+    association_timeout: int = 180    # Сек на одно слово (3 минуты)
     guessing_timeout: int = 300       # Сек на угадывание
     card_source: CardSource = CardSource.DEFAULT
     category: str = "mixed"

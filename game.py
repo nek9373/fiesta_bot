@@ -377,7 +377,7 @@ class GameEngine:
             return
         skull = room.get_skull_for_writer(user_id, room.current_tooth)
         if skull:
-            step = AssociationStep(author_id=user_id, word="...", step=room.current_tooth)
+            step = AssociationStep(author_id=user_id, word="(пропуск)", step=room.current_tooth)
             skull.steps.append(step)
             skull.teeth_filled = room.current_tooth + 1
         room.tooth_submitted.add(user_id)
