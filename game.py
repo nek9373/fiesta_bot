@@ -34,12 +34,10 @@ def validate_word(word: str, previous_word: str | None = None,
     """
     word = word.strip()
 
-    # Одно слово (сложные допускаются)
-    if ' ' in word and not '-' in word:
-        # Проверяем что это не два отдельных слова
-        parts = word.split()
-        if len(parts) > 1:
-            return "Только одно слово! Сложные слова (через дефис) допускаются."
+    # Одно слово (сложные через дефис допускаются)
+    parts = word.split()
+    if len(parts) > 1:
+        return "Только одно слово! Сложные слова (через дефис) допускаются."
 
     if len(word) < 2:
         return "Слишком короткое слово."

@@ -468,9 +468,10 @@ async def show_results(room):
         lines.append(f"  Последнее слово: \"{s['last_word']}\"")
         lines.append(f"  Угадали: {s['correct_count']}/{room.num_players}")
 
-        # Цепочка ассоциаций
-        chain_words = " -> ".join(step["word"] for step in s["chain"])
-        lines.append(f"  Цепочка: {s['character']} -> {chain_words}")
+        # Цепочка ассоциаций с авторами
+        chain_parts = [f"{step['word']} ({step['author']})" for step in s["chain"]]
+        chain_str = " -> ".join(chain_parts)
+        lines.append(f"  Цепочка: {s['character']} -> {chain_str}")
         lines.append("")
 
     full_text = "\n".join(lines)
@@ -537,7 +538,22 @@ async def cmd_start(message: Message):
     )
 
 
-@router.message(Command("rules"))
+@router.message(Command("help"))
+async def cmd_help(message: Message):
+    await message.answer(
+        "Команды:\n\n"
+        "/create — создать комнату\n"
+        "/join КОД — присоединиться к комнате\n"
+        "/leave — выйти из комнаты\n"
+        "/rules — правила игры\n"
+        "/mate — участники и статус ответов\n"
+        "/stats — твоя статистика\n"
+        "/feedback — отправить отзыв\n"
+        "/help — этот список"
+    )
+
+
+@router.message(Command("rules", "rule"))
 async def cmd_rules(message: Message):
     await message.answer(
         "Правила Fiesta:\n\n"
@@ -638,7 +654,14 @@ async def _join_room(message: Message, room_id: str):
                     pass
 
     is_host = user_id == room.host_id
-    await send_dm(user_id, f"Ты в комнате {room.room_id}!",
+    # Список участников в комнате
+    others = [p.first_name for uid, p in room.players.items() if uid != user_id]
+    if others:
+        players_list = ", ".join(others)
+        welcome_text = f"Ты в комнате {room.room_id}!\nУже здесь: {players_list}"
+    else:
+        welcome_text = f"Ты в комнате {room.room_id}!\nТы первый!"
+    await send_dm(user_id, welcome_text,
                   reply_markup=lobby_kb(room.room_id, is_host))
 
     if not dm_ok:
@@ -679,6 +702,38 @@ async def cmd_feedback(message: Message):
     except Exception as e:
         logger.error(f"Ошибка пересылки фидбека: {e}")
     await message.answer("Передано! Спасибо за обратную связь.")
+
+
+@router.message(Command("mate"))
+async def cmd_mate(message: Message):
+    user_id = message.from_user.id
+    room_id = player_rooms.get(user_id)
+    if not room_id:
+        await message.answer("Ты не в комнате.")
+        return
+
+    room = engine.rooms.get(room_id)
+    if not room:
+        await message.answer("Комната не найдена.")
+        return
+
+    lines = [f"Комната {room.room_id} — {room.num_players} игроков\n"]
+
+    for uid, p in room.players.items():
+        host_mark = " (хост)" if p.is_host else ""
+        if room.state == GameState.WRITING:
+            status = "ответил" if uid in room.tooth_submitted else "думает..."
+            lines.append(f"  {p.first_name}{host_mark} — {status}")
+        elif room.state == GameState.GUESSING:
+            status = "угадал" if uid in room.guessing_done else "думает..."
+            lines.append(f"  {p.first_name}{host_mark} — {status}")
+        else:
+            lines.append(f"  {p.first_name}{host_mark}")
+
+    if room.state == GameState.WRITING:
+        lines.append(f"\nРаунд: {room.current_tooth + 1}/{room.total_teeth}")
+
+    await message.answer("\n".join(lines))
 
 
 @router.message(Command("leave"))
@@ -732,7 +787,14 @@ async def cb_join(cb: CallbackQuery):
         if cb.message:
             await cb.message.reply(f"{player.first_name}, напиши мне: t.me/{bot_info.username}")
 
-    await send_dm(user_id, f"Ты в комнате {room.room_id}!",
+    # Список участников в комнате
+    others = [p.first_name for uid, p in room.players.items() if uid != user_id]
+    if others:
+        players_list = ", ".join(others)
+        welcome_text = f"Ты в комнате {room.room_id}!\nУже здесь: {players_list}"
+    else:
+        welcome_text = f"Ты в комнате {room.room_id}!\nТы первый!"
+    await send_dm(user_id, welcome_text,
                   reply_markup=lobby_kb(room.room_id, False))
     await update_group_status(room)
 
