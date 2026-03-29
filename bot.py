@@ -23,10 +23,6 @@ from store import FiestaStore
 
 _log_fmt = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 logging.basicConfig(level=logging.INFO, format=_log_fmt)
-# Файловый хендлер — один раз, без дублирования
-_fh = logging.FileHandler("fiesta.log", encoding="utf-8")
-_fh.setFormatter(logging.Formatter(_log_fmt))
-logging.getLogger().addHandler(_fh)
 logger = logging.getLogger(__name__)
 
 TOKEN = os.getenv("BOT_TOKEN")
