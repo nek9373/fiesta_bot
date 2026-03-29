@@ -29,7 +29,9 @@ _fh.setFormatter(logging.Formatter(_log_fmt))
 logging.getLogger().addHandler(_fh)
 logger = logging.getLogger(__name__)
 
-TOKEN = os.getenv("FIESTA_BOT_TOKEN", "8265764394:AAHji-WSZ7wmq92TOFv1FD2vRXobMMksv9c")
+TOKEN = os.getenv("BOT_TOKEN")
+if not TOKEN:
+    raise RuntimeError("BOT_TOKEN не задан — проверь .env")
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 router = Router()
